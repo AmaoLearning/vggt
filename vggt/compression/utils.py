@@ -19,6 +19,11 @@ def dct1d(x: Tensor, dim: int = -1, norm: str = "ortho") -> Tensor:
     Returns:
         与 x 相同形状的 DCT 系数
     """
+    orig_dtype = x.dtype
+    # torch.fft.rfft 不支持 bfloat16/float16，统一升到 float32 计算
+    if x.dtype in (torch.bfloat16, torch.float16):
+        x = x.float()
+
     N = x.shape[dim]
     # 1. 镜像扩展: [x0, x1, ..., xN-1, xN-1, ..., x1]
     v = torch.cat([x, x.flip([dim])], dim=dim)  # [..., 2N, ...]
@@ -44,13 +49,18 @@ def dct1d(x: Tensor, dim: int = -1, norm: str = "ortho") -> Tensor:
         idx[dim] = slice(0, 1)
         X[idx] = X[idx] / (2.0 ** 0.5)
 
-    return X
+    return X.to(orig_dtype)
 
 
 def idct1d(X: Tensor, dim: int = -1, norm: str = "ortho") -> Tensor:
     """
     1D IDCT-II（对应 dct1d 的逆变换）。
     """
+    orig_dtype = X.dtype
+    # torch.fft.irfft 不支持 bfloat16/float16，统一升到 float32 计算
+    if X.dtype in (torch.bfloat16, torch.float16):
+        X = X.float()
+
     N = X.shape[dim]
 
     if norm == "ortho":
@@ -77,7 +87,7 @@ def idct1d(X: Tensor, dim: int = -1, norm: str = "ortho") -> Tensor:
     Vc = torch.cat([X_c, zeros, neg_flip], dim=dim)   # [..., 2N+1 → 取前 2N]
 
     x = torch.fft.irfft(Vc.narrow(dim, 0, N + 1), n=2 * N, dim=dim)
-    return x.narrow(dim, 0, N) * N
+    return (x.narrow(dim, 0, N) * N).to(orig_dtype)
 
 
 def dct2d(x: Tensor, dims: tuple = (-2, -1), norm: str = "ortho") -> Tensor:

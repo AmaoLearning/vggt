@@ -30,6 +30,7 @@ VGGT 压缩机制综合评测脚本
 
 # ── 标准库 ────────────────────────────────────────────────────────────────────
 import argparse
+import contextlib
 import csv
 import json
 import os
@@ -432,37 +433,48 @@ def run_inference(model: VGGT, frames: torch.Tensor,
         elapsed  : 推理耗时（秒，不含 warmup）
     """
     # 准备输入：添加 batch 维，resize 到 518×518
-    imgs = frames.to(device).float()
+    # 模型保持 float32；VGGT 设计：aggregator 可在 autocast(bf16) 下运行，
+    # heads 通过内部 autocast(enabled=False) 保持 float32 精度。
+    # 不直接转换模型或输入到 bf16，避免 `_apply_pos_embed` 的 pos_embed.float()
+    # 与 bf16 特征张量产生 dtype 不一致。
+    imgs = frames.to(device).float()      # 保持 float32
     imgs = F.interpolate(imgs, size=(IMG_SIZE, IMG_SIZE),
                          mode="bilinear", align_corners=False)
-    imgs = imgs.unsqueeze(0)              # [1, S, 3, 518, 518]
-    imgs = imgs.to(dtype)
+    imgs = imgs.unsqueeze(0)              # [1, S, 3, 518, 518], float32
+
+    # CUDA 上使用 autocast 加速 aggregator；CPU 上不需要
+    _autocast = (
+        torch.cuda.amp.autocast(dtype=dtype)
+        if device == "cuda" else contextlib.nullcontext()
+    )
 
     with torch.no_grad():
-        with torch.cuda.amp.autocast(dtype=dtype):
-            # 热身
-            for _ in range(warmup):
+        # 热身
+        for _ in range(warmup):
+            with _autocast:
                 _ = model(imgs)
-                if device == "cuda":
-                    torch.cuda.synchronize()
-
-            # 正式计时（CUDA event，精度更高）
             if device == "cuda":
                 torch.cuda.synchronize()
-                start_evt = torch.cuda.Event(enable_timing=True)
-                end_evt   = torch.cuda.Event(enable_timing=True)
-                start_evt.record()
 
+        # 正式计时（CUDA event，精度更高）
+        if device == "cuda":
+            torch.cuda.synchronize()
+            start_evt = torch.cuda.Event(enable_timing=True)
+            end_evt   = torch.cuda.Event(enable_timing=True)
+            start_evt.record()
+
+            with _autocast:
                 preds = model(imgs)
 
-                end_evt.record()
-                torch.cuda.synchronize()
-                elapsed = start_evt.elapsed_time(end_evt) / 1000.0  # ms → s
-            else:
-                import time as _time
-                t0    = _time.perf_counter()
+            end_evt.record()
+            torch.cuda.synchronize()
+            elapsed = start_evt.elapsed_time(end_evt) / 1000.0  # ms → s
+        else:
+            import time as _time
+            t0    = _time.perf_counter()
+            with _autocast:
                 preds = model(imgs)
-                elapsed = _time.perf_counter() - t0
+            elapsed = _time.perf_counter() - t0
 
     # 将所有 tensor 移回 CPU，释放 GPU 显存
     preds_cpu = {
@@ -591,7 +603,7 @@ def eval_point_map(pred_world_pts: np.ndarray,
         # 即：对每个 GT 点，找最近 pred 点，再找该 pred 点最近的另一个 pred 点，比较法向量
         # 这只是一个近似。正式评估应传入 gt_normals。
         pred_nn_for_gt = pred_s[comp_idx]   # [N_gt, 3]  GT 对应的最近预测点
-        nn_idx2, _ = pred_tree.query(pred_nn_for_gt, k=2)  # k=2: [0]自身,[1]次近
+        _, nn_idx2 = pred_tree.query(pred_nn_for_gt, k=2)  # k=2: [0]自身,[1]次近
         if norm_s.ndim == 2:
             n1 = norm_s[comp_idx]             # [N_gt, 3]
             n2 = norm_s[nn_idx2[:, 1]]        # [N_gt, 3]
@@ -858,8 +870,10 @@ def run_all_evaluations(args) -> dict:
     print(f"{'='*60}")
     model: VGGT = VGGT.from_pretrained(args.model_name)
     model.eval().to(device)
-    if dtype == torch.bfloat16 and device == "cuda":
-        model = model.to(dtype)
+    # 模型保持 float32：VGGT 内部 heads 使用 autocast(enabled=False) 来确保
+    # 数值精度，依赖 float32 权重；直接转换到 bf16 会导致 _apply_pos_embed
+    # 中 pos_embed.float() 与 bf16 特征产生 dtype 冲突（Input FloatTensor,
+    # weight BFloat16Type）。推理中通过 autocast(dtype=bf16) 加速 aggregator。
 
     # ── 加载数据集 ─────────────────────────────────────────────────────────────
     datasets = {}
