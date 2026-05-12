@@ -46,6 +46,8 @@ class Attention(nn.Module):
         self.proj = nn.Linear(dim, dim, bias=proj_bias)
         self.proj_drop = nn.Dropout(proj_drop)
         self.rope = rope
+        self._compression_hook = None   # type: Optional["KVReductionHook"]
+        self._compression_ctx = None    # type: Optional["CompressionContext"]
 
     def forward(self, x: Tensor, pos=None) -> Tensor:
         B, N, C = x.shape
@@ -57,6 +59,12 @@ class Attention(nn.Module):
             q = self.rope(q, pos)
             k = self.rope(k, pos)
 
+        # ── KV/Token Reduction Hook 注入点 ────────────────────────────────────
+        unmerge_fn = None
+        if self._compression_hook is not None and self._compression_ctx is not None:
+            q, k, v, unmerge_fn = self._compression_hook(q, k, v, self._compression_ctx)
+        # ────────────────────────────────────────────────────────────────────────
+
         if self.fused_attn:
             x = F.scaled_dot_product_attention(q, k, v, dropout_p=self.attn_drop.p if self.training else 0.0)
         else:
@@ -65,6 +73,11 @@ class Attention(nn.Module):
             attn = attn.softmax(dim=-1)
             attn = self.attn_drop(attn)
             x = attn @ v
+
+        # ── Q unmerge ──────────────────────────────────────────────────────────
+        if unmerge_fn is not None:
+            x = unmerge_fn(x)   # [B, H, N_merged, D] → [B, H, N, D]
+        # ──────────────────────────────────────────────────────────────────────
 
         x = x.transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)

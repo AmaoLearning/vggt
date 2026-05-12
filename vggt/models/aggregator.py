@@ -295,6 +295,15 @@ class Aggregator(nn.Module):
 
         # by default, self.aa_block_size=1, which processes one block at a time
         for _ in range(self.aa_block_size):
+            # ── 写入压缩上下文 ───────────────────────────────────────────
+            attn_module = self.global_blocks[global_idx].attn
+            if attn_module._compression_ctx is not None:
+                attn_module._compression_ctx.S = S
+                attn_module._compression_ctx.P = P
+                attn_module._compression_ctx.layer_idx = global_idx
+                attn_module._compression_ctx.is_global = True
+            # ─────────────────────────────────────────────────────────────
+
             if self.training:
                 tokens = checkpoint(self.global_blocks[global_idx], tokens, pos, use_reentrant=self.use_reentrant)
             else:

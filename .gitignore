@@ -149,3 +149,5 @@ skyseg.onnx
 *.egg-info
 
 docs/*
+.7z
+tests/results/*
