@@ -639,14 +639,15 @@ def evaluate_7scenes(model: VGGT, data: dict, dtype: torch.dtype,
                 "comp_mean": np.nan, "comp_med": np.nan,
                 "nc_mean": np.nan}, elapsed
 
-    # Sim3 对齐（pred → GT）
-    rng = np.random.default_rng(42)
-    n_align = min(5000, len(pred_pts), len(gt_pts))
-    src_idx  = rng.choice(len(pred_pts), n_align, replace=False)
-    dst_idx  = rng.choice(len(gt_pts),  n_align, replace=False)
-    scale, R_align, t_align = umeyama_alignment(
-        pred_pts[src_idx], gt_pts[dst_idx]
+    # Sim3 对齐：使用预测相机中心与 GT 相机中心作为对应点（S 个对应对）
+    pose_enc_pred = preds["pose_enc"]                              # [1, S, 9]
+    extri_pred, _ = pose_encoding_to_extri_intri(
+        pose_enc_pred, image_size_hw=(IMG_SIZE, IMG_SIZE), build_intrinsics=False
     )
+    extri_pred_np    = extri_pred.squeeze(0).numpy()               # [S, 3, 4]
+    pred_cam_centers = _extri_to_cam_position(extri_pred_np)       # [S, 3]
+    gt_cam_centers   = data["poses_c2w"][:S, :3, 3]               # [S, 3]
+    scale, R_align, t_align = umeyama_alignment(pred_cam_centers, gt_cam_centers)
     pred_pts_aligned = scale * (R_align @ pred_pts.T).T + t_align
 
     # 计算法向量（用旋转对齐，不需要 scale/t）
@@ -765,17 +766,24 @@ def evaluate_tum(model: VGGT, data: dict, dtype: torch.dtype,
 def _scale_shift_align(pred: np.ndarray, gt: np.ndarray,
                        mask: np.ndarray) -> np.ndarray:
     """
-    Per-sequence 最小二乘 scale+shift 对齐：
-        aligned = pred * s + b  ≈  gt   (在 mask 区域)
+    Log-space 最小二乘 scale+shift 对齐（MiDaS 标准做法）：
+        s * log(pred) + b  ≈  log(gt)   (在 mask 区域)
+    等价于 aligned = pred^s * exp(b)，对各深度量级一视同仁，
+    避免线性空间下大深度主导拟合、导致小深度 abs_rel 虚高的问题。
     """
-    A = np.stack([pred[mask], np.ones_like(pred[mask])], axis=1)
-    b = gt[mask]
+    valid_mask = mask & (pred > 0)
+    if valid_mask.sum() < 10:
+        return pred
+    log_pred = np.log(pred[valid_mask].astype(np.float64))
+    log_gt   = np.log(gt[valid_mask].astype(np.float64))
+    A = np.stack([log_pred, np.ones_like(log_pred)], axis=1)
     try:
-        x, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
-        s, shift = float(x[0]), float(x[1])
+        x, _, _, _ = np.linalg.lstsq(A, log_gt, rcond=None)
+        s, b = float(x[0]), float(x[1])
     except np.linalg.LinAlgError:
         return pred
-    return pred * s + shift
+    safe_pred = np.maximum(pred, 1e-9).astype(np.float64)
+    return np.exp(s * np.log(safe_pred) + b).astype(np.float32)
 
 
 def eval_depth_sequence(pred_depth: np.ndarray,
