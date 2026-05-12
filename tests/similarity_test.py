@@ -32,8 +32,8 @@ from pathlib import Path
 
 # ── 路径修复：支持从任意目录运行 ──────────────────────────────────────────────
 # 将项目根目录加入 sys.path，确保 "vggt" 包可以被找到
-_SCRIPT_DIR = Path(__file__).resolve().parent           # docs/tests/
-_PROJECT_ROOT = _SCRIPT_DIR.parent.parent               # VGGT/
+_SCRIPT_DIR = Path(__file__).resolve().parent           # tests/
+_PROJECT_ROOT = _SCRIPT_DIR.parent              # VGGT/
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 # ─────────────────────────────────────────────────────────────────────────────
