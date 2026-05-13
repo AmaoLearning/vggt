@@ -47,6 +47,7 @@ N_PATCHES = PATCH_H * PATCH_W
 SPECIAL_TOKENS = 5
 TOKENS_PER_FRAME = SPECIAL_TOKENS + N_PATCHES
 N_GLOBAL_LAYERS = 24
+ENERGY_RATIO_TARGETS = [0.95, 0.90, 0.80, 0.50]
 COLORS = {"Q": "#1f77b4", "K": "#ff7f0e", "V": "#2ca02c"}
 
 
@@ -276,6 +277,32 @@ def compute_temporal_energy_retention_curve(mean_spectrum: torch.Tensor) -> Tupl
     return keep_counts[::-1], retention[::-1]
 
 
+def compute_band_upper_limits_from_retention(
+    kept_sizes_desc: np.ndarray,
+    retention_desc: np.ndarray,
+    targets: List[float],
+) -> List[int]:
+    """
+    Convert a retention curve into the minimal retained band upper limit that
+    reaches each target energy ratio.
+
+    For 2D, kept_sizes_desc is r in [37..1] and the returned upper limit is r-1
+    in [36..0]. For 1D, kept_sizes_desc is k in [20..1] and the returned upper
+    limit is k-1 in [19..0].
+    """
+    kept_sizes_asc = kept_sizes_desc[::-1]
+    retention_asc = retention_desc[::-1]
+    upper_limits = []
+    for target in targets:
+        hit_indices = np.where(retention_asc >= target)[0]
+        if len(hit_indices) == 0:
+            upper_limits.append(int(kept_sizes_asc[-1] - 1))
+            continue
+        kept_size = int(kept_sizes_asc[hit_indices[0]])
+        upper_limits.append(kept_size - 1)
+    return upper_limits
+
+
 def plot_spatial_2d_dct(energy: torch.Tensor, layer_idx: int, which: str, out_path: Path) -> None:
     """Plot per-frame spatial 2D-DCT heatmaps."""
     num_frames = energy.shape[0]
@@ -470,6 +497,11 @@ def analyze_layer(layer_idx: int, hook: AnalysisHook, num_frames: int, out_dir: 
         spatial_energy = compute_spatial_2d_dct_energy(patch_spatial)
         spatial_stats = compute_spatial_stats(spatial_energy)
         spatial_keep_sizes, spatial_retention = compute_spatial_energy_retention_curve(spatial_energy)
+        spatial_band_upper_limits = compute_band_upper_limits_from_retention(
+            spatial_keep_sizes,
+            spatial_retention,
+            ENERGY_RATIO_TARGETS,
+        )
         plot_spatial_2d_dct(spatial_energy, layer_idx, which, out_dir / f"spatial_2d_dct_{which}.png")
         plot_spatial_dc_ac_bar(spatial_energy, layer_idx, which, out_dir / f"spatial_dc_ac_bar_{which}.png")
         plot_spatial_energy_retention(
@@ -483,6 +515,11 @@ def analyze_layer(layer_idx: int, hook: AnalysisHook, num_frames: int, out_dir: 
         temporal_energy, mean_spectrum = compute_temporal_1d_dct_energy(patch_flat)
         temporal_stats = compute_temporal_stats(temporal_energy, mean_spectrum)
         temporal_keep_counts, temporal_retention = compute_temporal_energy_retention_curve(mean_spectrum)
+        temporal_band_upper_limits = compute_band_upper_limits_from_retention(
+            temporal_keep_counts,
+            temporal_retention,
+            ENERGY_RATIO_TARGETS,
+        )
         freq_spatial = temporal_energy.T.reshape(num_frames, PATCH_H, PATCH_W).numpy()
         plot_temporal_freq_spatial(freq_spatial, layer_idx, which, out_dir / f"temporal_freq_spatial_{which}.png")
         plot_temporal_patch_freq(temporal_energy.numpy(), layer_idx, which, out_dir / f"temporal_patch_freq_{which}.png")
@@ -501,12 +538,20 @@ def analyze_layer(layer_idx: int, hook: AnalysisHook, num_frames: int, out_dir: 
             out_dir / f"temporal_energy_retention_{which}.png",
         )
 
-        layer_stats[which] = {**spatial_stats, **temporal_stats}
+        layer_stats[which] = {
+            **spatial_stats,
+            **temporal_stats,
+            "energy_ratio_targets": list(ENERGY_RATIO_TARGETS),
+            "spatial_band_upper_limits": spatial_band_upper_limits,
+            "temporal_band_upper_limits": temporal_band_upper_limits,
+        }
         print(
             f"  Layer {layer_idx:02d} {which} "
             f"dc_ac_ratio={spatial_stats['dc_ac_ratio']:.3f} "
             f"temporal_low_freq_ratio={temporal_stats['temporal_low_freq_ratio']:.3f} "
-            f"effective_k={temporal_stats['temporal_effective_k']}"
+            f"effective_k={temporal_stats['temporal_effective_k']} "
+            f"spatial_bands={spatial_band_upper_limits} "
+            f"temporal_bands={temporal_band_upper_limits}"
         )
 
     hook.clear()
