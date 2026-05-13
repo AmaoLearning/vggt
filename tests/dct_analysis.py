@@ -238,6 +238,44 @@ def compute_temporal_stats(energy: torch.Tensor, mean_spectrum: torch.Tensor) ->
     }
 
 
+def compute_spatial_energy_retention_curve(energy: torch.Tensor) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Compute retained-energy ratio while shrinking the kept 2D low-frequency block
+    from full 37x37 down to 1x1 DC.
+
+    Returns:
+        sizes_desc: [37] retained square size r, ordered 37 -> 1
+        retention_desc: [37] retained energy ratio for top-left r x r block
+    """
+    mean_energy = energy.mean(dim=0).numpy()
+    total_energy = float(mean_energy.sum()) + 1e-8
+    sizes = np.arange(1, PATCH_H + 1)
+    retention = np.array([
+        float(mean_energy[:size, :size].sum() / total_energy)
+        for size in sizes
+    ])
+    return sizes[::-1], retention[::-1]
+
+
+def compute_temporal_energy_retention_curve(mean_spectrum: torch.Tensor) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Compute retained-energy ratio while shrinking the kept temporal low-frequency
+    coefficients from all 20 down to only the DC component.
+
+    Returns:
+        keep_desc: [S] retained coefficient count k, ordered S -> 1
+        retention_desc: [S] retained energy ratio for first k coefficients
+    """
+    spectrum = mean_spectrum.numpy()
+    total_energy = float(spectrum.sum()) + 1e-8
+    keep_counts = np.arange(1, len(spectrum) + 1)
+    retention = np.array([
+        float(spectrum[:keep_count].sum() / total_energy)
+        for keep_count in keep_counts
+    ])
+    return keep_counts[::-1], retention[::-1]
+
+
 def plot_spatial_2d_dct(energy: torch.Tensor, layer_idx: int, which: str, out_path: Path) -> None:
     """Plot per-frame spatial 2D-DCT heatmaps."""
     num_frames = energy.shape[0]
@@ -355,6 +393,48 @@ def plot_temporal_spectrum(
     plt.close(figure)
 
 
+def plot_spatial_energy_retention(
+    sizes_desc: np.ndarray,
+    retention_desc: np.ndarray,
+    layer_idx: int,
+    which: str,
+    out_path: Path,
+) -> None:
+    """Plot spatial retained-energy ratio while reducing 2D-DCT resolution."""
+    figure, axis = plt.subplots(figsize=(8, 4))
+    axis.plot(sizes_desc, retention_desc, "o-", color=COLORS[which], linewidth=1.5)
+    axis.set_xlabel("Retained low-frequency block size r (top-left r×r)", fontsize=10)
+    axis.set_ylabel("Retained energy / total energy", fontsize=10)
+    axis.set_title(f"Layer {layer_idx:02d} · {which} Spatial Energy Retention", fontsize=11)
+    axis.set_xlim(PATCH_H, 1)
+    axis.set_ylim(0.0, 1.02)
+    axis.grid(True, alpha=0.3)
+    figure.tight_layout()
+    figure.savefig(out_path, dpi=100, bbox_inches="tight")
+    plt.close(figure)
+
+
+def plot_temporal_energy_retention(
+    keep_desc: np.ndarray,
+    retention_desc: np.ndarray,
+    layer_idx: int,
+    which: str,
+    out_path: Path,
+) -> None:
+    """Plot temporal retained-energy ratio while reducing 1D-DCT coefficients."""
+    figure, axis = plt.subplots(figsize=(8, 4))
+    axis.plot(keep_desc, retention_desc, "o-", color=COLORS[which], linewidth=1.5)
+    axis.set_xlabel("Retained temporal low-frequency coefficient count k", fontsize=10)
+    axis.set_ylabel("Retained energy / total energy", fontsize=10)
+    axis.set_title(f"Layer {layer_idx:02d} · {which} Temporal Energy Retention", fontsize=11)
+    axis.set_xlim(len(keep_desc), 1)
+    axis.set_ylim(0.0, 1.02)
+    axis.grid(True, alpha=0.3)
+    figure.tight_layout()
+    figure.savefig(out_path, dpi=100, bbox_inches="tight")
+    plt.close(figure)
+
+
 def plot_summary_trend(all_stats: Dict[int, Dict[str, dict]], metric_key: str, ylabel: str, title: str, out_path: Path) -> None:
     """Plot a cross-layer trend for one metric."""
     layers = sorted(all_stats.keys())
@@ -389,11 +469,20 @@ def analyze_layer(layer_idx: int, hook: AnalysisHook, num_frames: int, out_dir: 
 
         spatial_energy = compute_spatial_2d_dct_energy(patch_spatial)
         spatial_stats = compute_spatial_stats(spatial_energy)
+        spatial_keep_sizes, spatial_retention = compute_spatial_energy_retention_curve(spatial_energy)
         plot_spatial_2d_dct(spatial_energy, layer_idx, which, out_dir / f"spatial_2d_dct_{which}.png")
         plot_spatial_dc_ac_bar(spatial_energy, layer_idx, which, out_dir / f"spatial_dc_ac_bar_{which}.png")
+        plot_spatial_energy_retention(
+            spatial_keep_sizes,
+            spatial_retention,
+            layer_idx,
+            which,
+            out_dir / f"spatial_energy_retention_{which}.png",
+        )
 
         temporal_energy, mean_spectrum = compute_temporal_1d_dct_energy(patch_flat)
         temporal_stats = compute_temporal_stats(temporal_energy, mean_spectrum)
+        temporal_keep_counts, temporal_retention = compute_temporal_energy_retention_curve(mean_spectrum)
         freq_spatial = temporal_energy.T.reshape(num_frames, PATCH_H, PATCH_W).numpy()
         plot_temporal_freq_spatial(freq_spatial, layer_idx, which, out_dir / f"temporal_freq_spatial_{which}.png")
         plot_temporal_patch_freq(temporal_energy.numpy(), layer_idx, which, out_dir / f"temporal_patch_freq_{which}.png")
@@ -403,6 +492,13 @@ def analyze_layer(layer_idx: int, hook: AnalysisHook, num_frames: int, out_dir: 
             which,
             temporal_stats,
             out_dir / f"temporal_spectrum_{which}.png",
+        )
+        plot_temporal_energy_retention(
+            temporal_keep_counts,
+            temporal_retention,
+            layer_idx,
+            which,
+            out_dir / f"temporal_energy_retention_{which}.png",
         )
 
         layer_stats[which] = {**spatial_stats, **temporal_stats}
@@ -479,7 +575,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="VGGT Global Attention DCT Analysis")
     parser.add_argument("--model_path", type=str, default="facebook/VGGT-1B", help="HuggingFace model ID or local path")
     parser.add_argument("--image_dir", type=str, required=True, help="Directory with at least num_frames images")
-    parser.add_argument("--output_dir", type=str, default="tests/dct_analysis_output")
+    parser.add_argument("--output_dir", type=str, default="tests/results/dct_analysis")
     parser.add_argument("--layers", type=str, default="all", help="'all' or comma-separated indices such as '0,6,12,18,23'")
     parser.add_argument("--num_frames", type=int, default=20)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
