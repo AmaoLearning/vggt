@@ -3,7 +3,10 @@ from .base import CompressionContext, KVReductionHook
 from .mechanism_a import TemporalStridePruning
 from .mechanism_b import TemporalDCTKVCompression
 from .mechanism_c import Spatial2DDCTCompression
+from .mechanism_c1 import FixedBandSpatialCompression
+from .mechanism_d2 import LocalRedundancyPairPruning
 from .mechanism_e import QueryDCTMerging
+from .mechanism_f import LowSimilaritySaliencyPruning
 from .hooks import apply_compression_hooks, remove_compression_hooks, CombinedHook
 
 __all__ = [
@@ -13,7 +16,10 @@ __all__ = [
     "TemporalStridePruning",
     "TemporalDCTKVCompression",
     "Spatial2DDCTCompression",
+    "FixedBandSpatialCompression",
+    "LocalRedundancyPairPruning",
     "QueryDCTMerging",
+    "LowSimilaritySaliencyPruning",
     "apply_compression_hooks",
     "remove_compression_hooks",
     "CombinedHook",

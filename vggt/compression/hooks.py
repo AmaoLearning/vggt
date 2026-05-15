@@ -4,7 +4,10 @@ from .config import CompressionConfig, get_layer_rKV
 from .mechanism_a import TemporalStridePruning
 from .mechanism_b import TemporalDCTKVCompression
 from .mechanism_c import Spatial2DDCTCompression
+from .mechanism_c1 import FixedBandSpatialCompression
+from .mechanism_d2 import LocalRedundancyPairPruning
 from .mechanism_e import QueryDCTMerging
+from .mechanism_f import LowSimilaritySaliencyPruning
 
 
 def apply_compression_hooks(model, config: CompressionConfig) -> None:
@@ -25,8 +28,14 @@ def apply_compression_hooks(model, config: CompressionConfig) -> None:
         hook = TemporalDCTKVCompression(config)
     elif mechanism == "C":
         hook = Spatial2DDCTCompression(config)
+    elif mechanism == "C1":
+        hook = FixedBandSpatialCompression(config)
+    elif mechanism == "D2":
+        hook = LocalRedundancyPairPruning(config)
     elif mechanism == "E":
         hook = QueryDCTMerging(config)
+    elif mechanism == "F":
+        hook = LowSimilaritySaliencyPruning(config)
     elif mechanism == "A+C":
         hook = CombinedHook(
             TemporalStridePruning(config),

@@ -14,6 +14,31 @@ LAYER_ZONE = {
     "deep": range(17, 24),      # 低帧间相似，低敏感
 }
 
+C1_ALLOWED_ENERGY_TARGETS = (0.95, 0.90, 0.80, 0.50)
+
+C1_SPATIAL_BAND_TABLES = {
+    0.95: {
+        "Q": [22, 25, 29, 30, 30, 31, 31, 31, 31, 31, 32, 32, 31, 31, 31, 31, 27, 11, 7, 8, 12, 3, 6, 6],
+        "K": [27, 25, 30, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 30, 32, 31, 31, 15, 18, 24, 20, 11, 9],
+        "V": [29, 26, 31, 33, 33, 33, 33, 33, 33, 33, 34, 34, 33, 33, 26, 34, 34, 32, 14, 14, 29, 25, 23, 2],
+    },
+    0.90: {
+        "Q": [12, 14, 20, 24, 23, 26, 24, 24, 24, 25, 27, 27, 26, 26, 25, 25, 17, 2, 3, 3, 5, 2, 4, 2],
+        "K": [17, 14, 24, 27, 28, 27, 27, 27, 27, 28, 28, 28, 28, 27, 23, 27, 26, 25, 5, 7, 13, 8, 7, 4],
+        "V": [22, 16, 26, 29, 28, 29, 29, 30, 29, 30, 31, 30, 30, 30, 15, 31, 32, 28, 2, 4, 21, 12, 12, 1],
+    },
+    0.80: {
+        "Q": [7, 9, 9, 12, 11, 14, 12, 12, 13, 12, 16, 17, 15, 15, 13, 13, 3, 1, 1, 1, 2, 1, 2, 1],
+        "K": [8, 7, 12, 17, 18, 17, 16, 17, 17, 18, 18, 19, 18, 17, 11, 17, 13, 12, 2, 2, 5, 2, 3, 2],
+        "V": [11, 3, 15, 21, 20, 21, 22, 22, 21, 23, 25, 24, 23, 23, 2, 24, 26, 18, 1, 1, 10, 2, 3, 1],
+    },
+    0.50: {
+        "Q": [1, 2, 1, 2, 2, 2, 1, 2, 2, 1, 2, 2, 2, 2, 2, 1, 0, 0, 0, 0, 0, 1, 0, 1],
+        "K": [2, 2, 2, 2, 3, 3, 2, 2, 3, 2, 2, 3, 2, 2, 2, 2, 1, 1, 0, 0, 1, 1, 1, 1],
+        "V": [2, 2, 2, 4, 3, 4, 4, 5, 4, 5, 6, 4, 3, 3, 1, 2, 4, 3, 1, 1, 1, 1, 1, 1],
+    },
+}
+
 
 @dataclass
 class CompressionConfig:
@@ -21,11 +46,14 @@ class CompressionConfig:
     压缩机制的总配置类。
     每个 CompressionConfig 对应一种压缩策略，在 apply_compression_hooks() 中使用。
 
-    mechanism: "A" | "B" | "C" | "E" | "A+C" | "E+C"
+    mechanism: "A" | "B" | "C" | "C1" | "D2" | "E" | "F" | "A+C" | "E+C"
         A:   KV 时序步长剪枝 + Q 组内 token merging（Spark3R 基线）
         B:   KV 时序 DCT 压缩
         C:   KV 空间 2D-DCT + 异常值保留（叠加在 A/B 之上）
+        C1:  依据离线 DCT 统计表的固定空间频带截断（Q/K/V 可分支配置）
+        D2:  相邻帧小窗口局部冗余对删除
         E:   DCT 代表元 Q merging（替代机制 A 的 Q 路径）
+        F:   FastVGGT 风格低相似显著 token 保留（以低相似度替代高范数打分）
         A+C: 机制 A（KV时序） + 机制 C（KV空间），联合压缩
         E+C: 机制 E（Q路径） + 机制 A KV路径 + 机制 C（KV空间）
     """
@@ -56,6 +84,29 @@ class CompressionConfig:
     spatial_low_freq_ratio: float = 0.30   # 2D DCT 保留的低频区域比例（面积比）
     spatial_outlier_ratio: float = 0.10    # 在低频基础上额外保留的异常值比例
     spatial_keep_special: bool = True      # special tokens 始终保留
+
+    # ── 方案 C1 的固定频带表参数 ─────────────────────────────────────────
+    c1_energy_target: float = 0.90         # 仅允许 {0.95, 0.90, 0.80, 0.50}
+    c1_enable_q_compression: bool = False  # 首版建议先做 KV-only，Q 压缩放在第二阶段
+    c1_reconstruct_mode: str = "lowres_idct"  # "lowres_idct" | "coeff_crop"
+    c1_q_unmerge_mode: str = "bilinear"   # Q 路径恢复到 37×37 的上采样方式
+
+    # ── 方案 D2 的局部匹配参数 ───────────────────────────────────────────
+    d2_window_radius: int = 2              # 小窗口半径，2 表示 5×5 邻域
+    d2_drop_ratio: float = 0.50            # 每个相邻帧对计划删除的冗余 pair 比例
+    d2_pair_stride: int = 1                # 使用 (t,t+1) 还是 (t,t+2) 等相邻帧对
+    d2_similarity_policy: str = "highest" # "highest"=删最高相似冗余对；"lowest" 用于实验备注
+    d2_apply_to_q: bool = False            # 首版建议仅删 KV，避免 Q 路径过敏感
+
+    # ── 方案 F 的显著 token 选择参数 ─────────────────────────────────────
+    f_keep_ratio_by_zone: Dict[str, float] = field(default_factory=lambda: {
+        "shallow": 0.35,
+        "sensitive": 0.60,
+        "deep": 0.45,
+    })
+    f_dst_policy: str = "next_frame"      # "next_frame" | "prev_frame" | "anchor_frame"
+    f_match_mode: str = "global"          # "global"=全量匹配；"window"=局部窗口加速
+    f_window_radius: int = 2               # window 模式下的邻域半径
 
     # ── 通用 ─────────────────────────────────────────────────────────────
     only_global: bool = True    # 仅压缩 global_blocks（推荐）
@@ -103,3 +154,30 @@ def get_temporal_keep_ratio(layer_idx: int, config: "CompressionConfig") -> floa
         return config.temporal_keep_ratio_by_zone["sensitive"]
     else:
         return config.temporal_keep_ratio_by_zone["deep"]
+
+
+def get_c1_spatial_band_upper(layer_idx: int, branch: str, target_ratio: float) -> int:
+    """根据离线统计表返回 C1 的空间频带上限。"""
+    matched_ratio = None
+    for allowed in C1_ALLOWED_ENERGY_TARGETS:
+        if abs(float(target_ratio) - allowed) < 1e-6:
+            matched_ratio = allowed
+            break
+    if matched_ratio is None:
+        raise ValueError(
+            f"Unsupported c1_energy_target={target_ratio}, expected one of {C1_ALLOWED_ENERGY_TARGETS}."
+        )
+    branch = branch.upper()
+    if branch not in ("Q", "K", "V"):
+        raise ValueError(f"Unsupported branch '{branch}', expected one of ('Q', 'K', 'V').")
+    return C1_SPATIAL_BAND_TABLES[matched_ratio][branch][layer_idx]
+
+
+def get_f_keep_ratio(layer_idx: int, config: "CompressionConfig") -> float:
+    """根据层编号返回方案 F 的保留比例。"""
+    if layer_idx in LAYER_ZONE["shallow"]:
+        return config.f_keep_ratio_by_zone["shallow"]
+    elif layer_idx in LAYER_ZONE["sensitive"]:
+        return config.f_keep_ratio_by_zone["sensitive"]
+    else:
+        return config.f_keep_ratio_by_zone["deep"]
