@@ -125,21 +125,21 @@ def build_compression_configs() -> Dict[str, Optional[object]]:
             kv_insensitive_multiplier=3.0,
             enable_q_compression=False,
         ),
-        # 机制 B：时序 DCT KV 软压缩
-        "B": CompressionConfig(
-            mechanism="B",
-            temporal_keep_ratio_by_zone={
-                "shallow":   0.25,
-                "sensitive": 0.70,
-                "deep":      0.45,
-            },
-        ),
-        # 机制 C：空间 2D-DCT + 异常值保留
-        "C": CompressionConfig(
-            mechanism="C",
-            spatial_low_freq_ratio=0.30,
-            spatial_outlier_ratio=0.10,
-        ),
+#        # 机制 B：时序 DCT KV 软压缩
+#        "B": CompressionConfig(
+#            mechanism="B",
+#            temporal_keep_ratio_by_zone={
+#                "shallow":   0.25,
+#                "sensitive": 0.70,
+#                "deep":      0.45,
+#            },
+#        ),
+#        # 机制 C：空间 2D-DCT + 异常值保留
+#        "C": CompressionConfig(
+#            mechanism="C",
+#            spatial_low_freq_ratio=0.30,
+#            spatial_outlier_ratio=0.10,
+#        ),
         # 方案 C1：固定空间频带表（90% 保能，保留现有名称便于兼容旧用法）
         "C1": CompressionConfig(
             mechanism="C1",
@@ -173,13 +173,13 @@ def build_compression_configs() -> Dict[str, Optional[object]]:
             d2_drop_ratio=0.50,
             d2_similarity_policy="highest",
         ),
-        # 机制 E：DCT 代表元 Q merging
-        "E": CompressionConfig(
-            mechanism="E",
-            q_group_size=20,
-            kv_insensitive_multiplier=3.0,
-            enable_q_compression=True,
-        ),
+#        # 机制 E：DCT 代表元 Q merging
+#        "E": CompressionConfig(
+#            mechanism="E",
+#            q_group_size=20,
+#            kv_insensitive_multiplier=3.0,
+#            enable_q_compression=True,
+#        ),
         # 方案 F：低相似显著 token 保留
         "F": CompressionConfig(
             mechanism="F",
@@ -191,22 +191,22 @@ def build_compression_configs() -> Dict[str, Optional[object]]:
                 "deep": 0.45,
             },
         ),
-        # 联合：机制 A + C（时序 + 空间双级压缩）
-        "A+C": CompressionConfig(
-            mechanism="A+C",
-            q_group_size=20,
-            kv_insensitive_multiplier=3.0,
-            spatial_low_freq_ratio=0.30,
-            spatial_outlier_ratio=0.10,
-        ),
-        # 联合：机制 E + C
-        "E+C": CompressionConfig(
-            mechanism="E+C",
-            q_group_size=20,
-            kv_insensitive_multiplier=3.0,
-            spatial_low_freq_ratio=0.30,
-            spatial_outlier_ratio=0.10,
-        ),
+#        # 联合：机制 A + C（时序 + 空间双级压缩）
+#        "A+C": CompressionConfig(
+#            mechanism="A+C",
+#            q_group_size=20,
+#            kv_insensitive_multiplier=3.0,
+#            spatial_low_freq_ratio=0.30,
+#            spatial_outlier_ratio=0.10,
+#        ),
+#        # 联合：机制 E + C
+#        "E+C": CompressionConfig(
+#            mechanism="E+C",
+#            q_group_size=20,
+#            kv_insensitive_multiplier=3.0,
+#            spatial_low_freq_ratio=0.30,
+#            spatial_outlier_ratio=0.10,
+#        ),
     })
     return configs
 
