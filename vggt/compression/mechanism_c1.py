@@ -109,6 +109,8 @@ class FixedBandSpatialCompression(KVReductionHook):
         return compressed
 
     def _compress_patch_grid(self, patch_grid: Tensor, active_h: int, output_h: int) -> Tensor:
+        N_spatial = patch_grid.shape[-3]   # 原始空间尺寸 N（VGGT 中为 37）
+
         coeff = dct2d(patch_grid, dims=(-3, -2), norm="ortho")
         coeff = coeff[:, :, :, :active_h, :active_h, :]
         if output_h > active_h:
@@ -125,7 +127,13 @@ class FixedBandSpatialCompression(KVReductionHook):
         if self.config.c1_reconstruct_mode == "coeff_crop":
             return coeff
         if self.config.c1_reconstruct_mode == "lowres_idct":
-            return idct2d(coeff, dims=(-3, -2), norm="ortho")
+            # FreqKV 振幅修正（参考 FreqKV Eq.3）：
+            # 对 ortho 归一化的 2D 可分离 DCT，从 N×N 点 DCT 截断到 r×r 点后做 r 点 IDCT，
+            # 重建信号的均值被放大了 N/r 倍（推导：Z[0,0] = N·mean(x)，r 点 IDCT 还原后
+            # mean(x̂) = Z[0,0]/r = N/r · mean(x)）。
+            # 故需乘以 r/N = output_h/N_spatial 来恢复原始幅度。
+            scale = output_h / N_spatial
+            return idct2d(coeff, dims=(-3, -2), norm="ortho") * scale
         raise ValueError(
             f"Unsupported c1_reconstruct_mode='{self.config.c1_reconstruct_mode}', expected 'lowres_idct' or 'coeff_crop'."
         )

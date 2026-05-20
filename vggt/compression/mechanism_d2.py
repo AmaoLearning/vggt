@@ -94,40 +94,39 @@ class LocalRedundancyPairPruning(KVReductionHook):
         pair_count: int,
         policy: str,
     ) -> Tuple[Tensor, Tensor]:
+        """向量化选对：消除 dst 冲突后按优先级取前 pair_count 对。
+
+        由于 nearest-neighbor 匹配每个 src 恰好对应一个 dst，src 间不存在冲突，
+        只需处理多个 src 映射到同一 dst 的情况：保留优先级最高（rank 最小）的 src。
+        使用 scatter_reduce "amin" 实现全向量化，无 Python 循环。
+        """
         if pair_count <= 0:
             empty = torch.empty(0, dtype=torch.long, device=scores.device)
             return empty, empty
 
-        if policy == "highest":
-            order = torch.argsort(scores, descending=True)
-        elif policy == "lowest":
-            order = torch.argsort(scores, descending=False)
-        else:
-            raise ValueError("d2_similarity_policy must be either 'highest' or 'lowest'.")
+        if policy not in ("highest", "lowest"):
+            raise ValueError("d2_similarity_policy must be 'highest' or 'lowest'.")
 
-        used_src = torch.zeros(scores.shape[0], dtype=torch.bool, device=scores.device)
-        used_dst = torch.zeros(scores.shape[0], dtype=torch.bool, device=scores.device)
-        selected_src = []
-        selected_dst = []
+        N = scores.shape[0]
+        descending = (policy == "highest")
+        order = torch.argsort(scores, descending=descending)   # [N] priority-sorted src indices
 
-        for src_idx in order.tolist():
-            dst_idx = int(matched_dst[src_idx].item())
-            if used_src[src_idx] or used_dst[dst_idx]:
-                continue
-            used_src[src_idx] = True
-            used_dst[dst_idx] = True
-            selected_src.append(src_idx)
-            selected_dst.append(dst_idx)
-            if len(selected_src) >= pair_count:
-                break
+        # rank_of[src] = src 在 order 中的位置（越小优先级越高）
+        rank_of = torch.empty(N, dtype=torch.long, device=scores.device)
+        rank_of[order] = torch.arange(N, device=scores.device)
 
-        if not selected_src:
-            empty = torch.empty(0, dtype=torch.long, device=scores.device)
-            return empty, empty
-        return (
-            torch.tensor(selected_src, dtype=torch.long, device=scores.device),
-            torch.tensor(selected_dst, dtype=torch.long, device=scores.device),
-        )
+        # 对每个 dst，找到最高优先级（最小 rank）的 src
+        best_rank_per_dst = torch.full((N,), N, dtype=torch.long, device=scores.device)
+        best_rank_per_dst.scatter_reduce_(0, matched_dst, rank_of, reduce="amin", include_self=True)
+
+        # canonical src：它是其 dst 的最高优先级 src（消除 dst 冲突后保留的唯一代表）
+        is_canonical = rank_of == best_rank_per_dst[matched_dst]   # [N]
+
+        # 按优先级顺序取前 pair_count 个 canonical 配对
+        canonical_by_priority = order[is_canonical[order]]
+        selected_src = canonical_by_priority[:pair_count]
+        selected_dst = matched_dst[selected_src]
+        return selected_src, selected_dst
 
     @staticmethod
     def _build_window_candidates(
@@ -136,20 +135,29 @@ class LocalRedundancyPairPruning(KVReductionHook):
         radius: int,
         device: torch.device,
     ) -> Tuple[Tensor, Tensor]:
-        max_candidates = (2 * radius + 1) ** 2
-        candidates = torch.full((grid_h * grid_w, max_candidates), -1, dtype=torch.long, device=device)
-        valid_mask = torch.zeros((grid_h * grid_w, max_candidates), dtype=torch.bool, device=device)
+        """预计算窗口候选索引表（向量化，无 Python 循环）。
 
-        for row in range(grid_h):
-            for col in range(grid_w):
-                patch_idx = row * grid_w + col
-                write_idx = 0
-                for drow in range(-radius, radius + 1):
-                    for dcol in range(-radius, radius + 1):
-                        neigh_row = row + drow
-                        neigh_col = col + dcol
-                        if 0 <= neigh_row < grid_h and 0 <= neigh_col < grid_w:
-                            candidates[patch_idx, write_idx] = neigh_row * grid_w + neigh_col
-                            valid_mask[patch_idx, write_idx] = True
-                            write_idx += 1
-        return candidates, valid_mask
+        返回:
+            candidates: [P, K] long，邻域 patch 的展平线性索引（越界处填 -1）
+            valid_mask: [P, K] bool，True 表示对应候选合法
+        其中 P = grid_h × grid_w，K = (2*radius+1)²。
+        """
+        # 偏移量网格 [K]
+        dr = torch.arange(-radius, radius + 1, device=device)
+        dc = torch.arange(-radius, radius + 1, device=device)
+        drows, dcols = torch.meshgrid(dr, dc, indexing="ij")   # [2R+1, 2R+1]
+        drows = drows.reshape(-1)                               # [K]
+        dcols = dcols.reshape(-1)                               # [K]
+
+        # 每个 patch 的行列坐标 [P]
+        rows = torch.arange(grid_h, device=device).unsqueeze(1).expand(-1, grid_w).reshape(-1)
+        cols = torch.arange(grid_w, device=device).unsqueeze(0).expand(grid_h, -1).reshape(-1)
+
+        # 所有候选坐标 [P, K]
+        nr = rows.unsqueeze(1) + drows.unsqueeze(0)
+        nc = cols.unsqueeze(1) + dcols.unsqueeze(0)
+        valid = (nr >= 0) & (nr < grid_h) & (nc >= 0) & (nc < grid_w)   # [P, K]
+
+        clamped_idx = nr.clamp(0, grid_h - 1) * grid_w + nc.clamp(0, grid_w - 1)
+        candidates = torch.where(valid, clamped_idx, torch.full_like(clamped_idx, -1))
+        return candidates, valid

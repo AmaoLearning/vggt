@@ -97,7 +97,7 @@ class CompressionConfig:
     d2_window_radius: int = 2              # 小窗口半径，2 表示 5×5 邻域
     d2_drop_ratio: float = 0.50            # 每个相邻帧对计划删除的冗余 pair 比例
     d2_pair_stride: int = 1                # 使用 (t,t+1) 还是 (t,t+2) 等相邻帧对
-    d2_similarity_policy: str = "highest" # "highest"=删最高相似冗余对；"lowest" 用于实验备注
+    d2_similarity_policy: str = "lowest"  # "lowest"=删最低相似配对（保留可靠对应关系，用于位姿估计）
     d2_apply_to_q: bool = False            # 首版建议仅删 KV，避免 Q 路径过敏感
 
     # ── 方案 F 的显著 token 选择参数 ─────────────────────────────────────
