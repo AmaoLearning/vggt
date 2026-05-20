@@ -85,7 +85,7 @@ class TemporalStridePruning(KVReductionHook):
         q: Tensor,           # [B, H, S*P, D]
         S: int, P: int,
         rQ: int,
-        special_tokens: int,  # = 5
+        special_tokens: int,  # = 5（仅用于传递兼容性，不再控制行为）
         G: int,               # 分组大小，默认 20
     ) -> Tuple[Tensor, Callable]:
         """
@@ -93,10 +93,11 @@ class TemporalStridePruning(KVReductionHook):
         在每组内部执行 token merging，reduction factor = rQ。
 
         循环空间偏移策略（Spark3R 风格，O(S·P) 复杂度）：
-          - 对于 patch 位置 p 和帧索引 i（在组内 0-indexed）：
+          - 对于所有位置 p（含 special tokens）和帧索引 i（在组内 0-indexed）：
               若 i % rQ == p % rQ → 该 token 是 destination
               否则              → 是 source，合并到同一位置的 destination 帧
-          - Special tokens（前 special_tokens 个）：所有帧均为 destination
+          - Special tokens 与 patch tokens 一视同仁（Spark3R 论文未提及对 special tokens
+            做任何豁免，此处严格遵循论文描述）
 
         返回:
           q_merged:   [B, H, N_merged, D]，N_merged = groups * G//rQ * P + special_extra
@@ -222,21 +223,19 @@ class TemporalStridePruning(KVReductionHook):
         """
         dst_mask: [g_size, P]，True = destination token
 
-        规则：
-          - 前 special_tokens 列（camera + register）：所有帧均为 dst
-          - Patch 位置 p，帧 i（在组内 0-indexed）：
+        规则（严格遵循 Spark3R 论文 Section IV-B，不对 special tokens 做豁免）：
+          - 所有位置 p（含 camera/register special tokens）和帧 i（组内 0-indexed）：
               若 i % rQ == p % rQ → destination
               否则              → source
+        Special tokens 与 patch tokens 采用完全相同的循环偏移规则。
         """
         dst_mask = torch.zeros(g_size, P, dtype=torch.bool, device=device)
-        # special tokens 全部是 dst
-        dst_mask[:, :special_tokens] = True
-        # patch tokens：循环偏移
+        # 所有位置（含 special tokens）均按循环偏移规则决定 dst/src
         for i in range(g_size):
             offset = i % rQ
-            patch_positions = torch.arange(special_tokens, P, device=device)
-            is_dst = ((patch_positions - special_tokens) % rQ) == offset
-            dst_mask[i, special_tokens:] = is_dst
+            all_positions = torch.arange(P, device=device)
+            is_dst = (all_positions % rQ) == offset
+            dst_mask[i, :] = is_dst
         return dst_mask
 
     @staticmethod
@@ -257,14 +256,12 @@ class TemporalStridePruning(KVReductionHook):
         n_src = src_flat_idx.shape[0]
         n_dst = dst_flat_idx.shape[0]
 
-        # 对于 patch token：source (frame_i, pos_p) 的目标 frame 满足 frame % rQ == p % rQ
-        # 最近帧 = round(src_frame / rQ) * rQ + (p % rQ)，再 clip 到 [0, g_size)
+        # 所有 token（含 special tokens）均按同一公式匹配：
+        # source (frame_i, pos_p) → destination 帧满足 frame % rQ == p % rQ
+        # 最近 dst 帧 = (src_frame // rQ) * rQ + (p % rQ)，再 clip 到 [0, g_size)
         target_frame_raw = (src_frame // rQ) * rQ + (src_patch % rQ)
         target_frame = target_frame_raw.clamp(0, g_size - 1)
-
-        # Special token: target frame = src_frame itself（因为 special 所有帧都是 dst）
-        is_special = src_patch < special_tokens
-        target_frame = torch.where(is_special, src_frame, target_frame)
+        # （无 special token 豁免，与 Spark3R 论文一致）
 
         # 计算目标 flat idx（在 g_size*P 中）
         target_flat = target_frame * P + src_patch  # [n_src]

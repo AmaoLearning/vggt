@@ -71,7 +71,9 @@ class CompressionConfig:
     kv_base_reduction_factor: Optional[int] = None   # None = 自动按 S 计算
     kv_sensitive_multiplier: float = 1.0   # 敏感层的 rKV 乘数（默认不变）
     kv_insensitive_multiplier: float = 3.0 # 非敏感层的 rKV 乘数（Spark3R 默认 l=3）
-    always_keep_special_tokens: bool = True # camera + register 始终保留完整帧
+    # NOTE: always_keep_special_tokens 已移除。Spark3R 论文未提及对 special tokens 做
+    # 任何豁免，机制 A 的 _build_dst_mask 现在对所有位置（含 camera/register）
+    # 采用相同的循环偏移规则。
 
     # ── 机制 B 的 DCT 参数 ────────────────────────────────────────────────
     temporal_keep_ratio_by_zone: Dict[str, float] = field(default_factory=lambda: {
@@ -104,7 +106,7 @@ class CompressionConfig:
         "sensitive": 0.60,
         "deep": 0.45,
     })
-    f_dst_policy: str = "next_frame"      # "next_frame" | "prev_frame" | "anchor_frame"
+    f_dst_policy: str = "anchor_frame"      # "next_frame" | "prev_frame" | "anchor_frame"
     f_match_mode: str = "global"          # "global"=全量匹配；"window"=局部窗口加速
     f_window_radius: int = 2               # window 模式下的邻域半径
 
