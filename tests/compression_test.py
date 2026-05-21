@@ -173,6 +173,51 @@ def build_compression_configs() -> Dict[str, Optional[object]]:
             d2_drop_ratio=0.50,
             d2_similarity_policy="highest",
         ),
+        "D3_99": CompressionConfig(
+            mechanism="D3",
+            d3_reference="adjacent",
+            d3_threshold=0.99
+        ),
+        "D3_95": CompressionConfig(
+            mechanism="D3",
+            d3_reference="adjacent",
+            d3_threshold=0.95
+        ),
+        "D3_90": CompressionConfig(
+            mechanism="D3",
+            d3_reference="adjacent",
+            d3_threshold=0.90
+        ),
+        "D3_80": CompressionConfig(
+            mechanism="D3",
+            d3_reference="adjacent",
+            d3_threshold=0.80
+        ),
+        "D3_70": CompressionConfig(
+            mechanism="D3",
+            d3_reference="adjacent",
+            d3_threshold=0.70
+        ),
+        "D3_60": CompressionConfig(
+            mechanism="D3",
+            d3_reference="adjacent",
+            d3_threshold=0.60
+        ),
+        "D3_50": CompressionConfig(
+            mechanism="D3",
+            d3_reference="adjacent",
+            d3_threshold=0.50
+        ),
+        "D3_10": CompressionConfig(
+            mechanism="D3",
+            d3_reference="adjacent",
+            d3_threshold=0.10
+        ),
+        "D3_first": CompressionConfig(
+            mechanism="D3",
+            d3_reference="first",
+            d3_threshold=0.90
+        ),
 #        # 机制 E：DCT 代表元 Q merging
 #        "E": CompressionConfig(
 #            mechanism="E",
@@ -1091,7 +1136,7 @@ def _safe_get(results: dict, cfg: str, task: str, metric: str,
 def plot_speed_comparison(results: dict, out_dir: Path) -> None:
     cfgs  = list(results.keys())
     tasks = ["7scenes", "tum", "sintel"]
-    task_labels = {"7scenes": "点图 (7-Scenes)", "tum": "位姿 (TUM)", "sintel": "深度 (Sintel)"}
+    task_labels = {"7scenes": "Point Map (7-Scenes)", "tum": "Camera Pose (TUM)", "sintel": "Depth (Sintel)"}
 
     times = {t: [_safe_get(results, c, t, "time_s") for c in cfgs] for t in tasks}
 
@@ -1113,8 +1158,8 @@ def plot_speed_comparison(results: dict, out_dir: Path) -> None:
 
     ax.set_xticks(x + w)
     ax.set_xticklabels(cfgs, rotation=20, ha="right")
-    ax.set_ylabel("推理耗时（秒）")
-    ax.set_title("各压缩机制推理速度对比")
+    ax.set_ylabel("Inference Time (s)")
+    ax.set_title("Inference Speed: Mechanism Comparison")
     ax.legend()
     ax.grid(True, axis="y", alpha=0.3)
     plt.tight_layout()
@@ -1141,7 +1186,7 @@ def _speedup_bar(ax, cfgs, vals, baseline_val, title, ylabel):
             continue
         ax.text(bar.get_x() + bar.get_width() / 2,
                 bar.get_height() + 0.01,
-                f"{r:.2f}×", ha="center", va="bottom", fontsize=8)
+                f"{r:.2f}x", ha="center", va="bottom", fontsize=8)
     ax.set_xticks(x)
     ax.set_xticklabels(cfgs, rotation=20, ha="right")
     ax.set_ylabel(ylabel)
@@ -1199,7 +1244,7 @@ def plot_metric_comparison(results: dict, task: str, metrics: List[str],
         ax.set_title(f"{metric_labels.get(metric, metric)}")
         ax.grid(True, axis="y", alpha=0.3)
 
-    fig.suptitle(f"精度对比：{task}", fontsize=13)
+    fig.suptitle(f"Accuracy Comparison: {task}", fontsize=13)
     plt.tight_layout()
     plt.savefig(out_path, dpi=150)
     plt.close()
@@ -1225,7 +1270,7 @@ def save_all_plots(results: dict, out_dir: Path) -> None:
         plot_metric_comparison(
             results, "tum",
             metrics        = ["ate", "rpet", "rper"],
-            metric_labels  = {"ate": "ATE (m)", "rpet": "RPEt (m)", "rper": "RPEr (°)"},
+            metric_labels  = {"ate": "ATE (m)", "rpet": "RPEt (m)", "rper": "RPEr (deg)"},
             lower_is_better = [True, True, True],
             out_path       = out_dir / "metric_comparison_tum.png",
         )
@@ -1235,7 +1280,7 @@ def save_all_plots(results: dict, out_dir: Path) -> None:
         plot_metric_comparison(
             results, "sintel",
             metrics        = ["abs_rel", "delta_125"],
-            metric_labels  = {"abs_rel": "AbsRel (↓)", "delta_125": "δ<1.25 (↑)"},
+            metric_labels  = {"abs_rel": "AbsRel (lower=better)", "delta_125": "delta<1.25 (higher=better)"},
             lower_is_better = [True, False],
             out_path       = out_dir / "metric_comparison_sintel.png",
         )
