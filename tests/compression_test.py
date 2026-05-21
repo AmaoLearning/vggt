@@ -118,13 +118,13 @@ def build_compression_configs() -> Dict[str, Optional[object]]:
             kv_insensitive_multiplier=3.0,
             enable_q_compression=True,
         ),
-        # 机制 A（仅 KV，用于与 B/C 公平对比）
-        "A_kv_only": CompressionConfig(
-            mechanism="A",
-            q_group_size=20,
-            kv_insensitive_multiplier=3.0,
-            enable_q_compression=False,
-        ),
+#        # 机制 A（仅 KV，用于与 B/C 公平对比）
+#        "A_kv_only": CompressionConfig(
+#            mechanism="A",
+#            q_group_size=20,
+#            kv_insensitive_multiplier=3.0,
+#            enable_q_compression=False,
+#        ),
 #        # 机制 B：时序 DCT KV 软压缩
 #        "B": CompressionConfig(
 #            mechanism="B",
@@ -140,32 +140,32 @@ def build_compression_configs() -> Dict[str, Optional[object]]:
 #            spatial_low_freq_ratio=0.30,
 #            spatial_outlier_ratio=0.10,
 #        ),
-        # 方案 C1：固定空间频带表（90% 保能，保留现有名称便于兼容旧用法）
-        "C1": CompressionConfig(
-            mechanism="C1",
-            c1_energy_target=0.90,
-            c1_enable_q_compression=False,
-            c1_reconstruct_mode="lowres_idct",
-        ),
-        # 方案 C1：固定空间频带表（95% / 80% / 50% 保能并行对比）
-        "C1_95": CompressionConfig(
-            mechanism="C1",
-            c1_energy_target=0.95,
-            c1_enable_q_compression=False,
-            c1_reconstruct_mode="lowres_idct",
-        ),
-        "C1_80": CompressionConfig(
-            mechanism="C1",
-            c1_energy_target=0.80,
-            c1_enable_q_compression=False,
-            c1_reconstruct_mode="lowres_idct",
-        ),
-        "C1_50": CompressionConfig(
-            mechanism="C1",
-            c1_energy_target=0.50,
-            c1_enable_q_compression=False,
-            c1_reconstruct_mode="lowres_idct",
-        ),
+#        # 方案 C1：固定空间频带表（90% 保能，保留现有名称便于兼容旧用法）
+#        "C1": CompressionConfig(
+#            mechanism="C1",
+#            c1_energy_target=0.90,
+#            c1_enable_q_compression=False,
+#            c1_reconstruct_mode="lowres_idct",
+#        ),
+#        # 方案 C1：固定空间频带表（95% / 80% / 50% 保能并行对比）
+#        "C1_95": CompressionConfig(
+#            mechanism="C1",
+#            c1_energy_target=0.95,
+#            c1_enable_q_compression=False,
+#            c1_reconstruct_mode="lowres_idct",
+#        ),
+#        "C1_80": CompressionConfig(
+#            mechanism="C1",
+#            c1_energy_target=0.80,
+#            c1_enable_q_compression=False,
+#            c1_reconstruct_mode="lowres_idct",
+#        ),
+#        "C1_50": CompressionConfig(
+#            mechanism="C1",
+#            c1_energy_target=0.50,
+#            c1_enable_q_compression=False,
+#            c1_reconstruct_mode="lowres_idct",
+#        ),
         # 方案 D2：相邻帧局部冗余对删除
         "D2": CompressionConfig(
             mechanism="D2",
