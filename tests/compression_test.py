@@ -53,6 +53,18 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+try:
+    import open3d as o3d
+    O3D_AVAILABLE = True
+except ImportError:
+    O3D_AVAILABLE = False
+    warnings.warn(
+        "[compression_test] open3d not found. ICP refinement and NC for "
+        "point map evaluation will be disabled.\n"
+        "  Install with: pip install open3d",
+        stacklevel=2,
+    )
+
 # ── 项目路径 ──────────────────────────────────────────────────────────────────
 _SCRIPT_DIR  = Path(__file__).resolve().parent        # tests/
 _PROJECT_ROOT = _SCRIPT_DIR.parent                    # VGGT/
@@ -635,69 +647,77 @@ def _compute_grid_normals(pts_grid: np.ndarray) -> np.ndarray:
 
 
 def eval_point_map(pred_world_pts: np.ndarray,
-                   pred_normals: Optional[np.ndarray],
                    gt_pts: np.ndarray,
                    max_dist_m: float = 0.1) -> dict:
     """
-    评估点图预测质量。
+    Evaluate point map quality (Acc, Comp, NC).
 
-    Args:
-        pred_world_pts : [N_pred, 3]  预测点云（已经 Sim3 对齐至 GT 坐标系）
-        pred_normals   : [N_pred, 3] | None  预测法向量（也经 R 对齐，scale 不影响法向量）
-        gt_pts         : [N_gt, 3]   GT 点云
-        max_dist_m     : 截断距离（避免离群点主导均值）
-
-    Returns:
-        acc_mean, acc_med, comp_mean, comp_med, nc_mean
+    If open3d is available, follows the FastVGGT evaluation protocol:
+      - ICP point-to-point refinement (threshold=0.1 m) on top of Sim3
+      - Normal consistency via open3d.estimate_normals
+        NC = mean(|cos(pred_n, gt_n)|) averaged over both acc and comp directions
+    Otherwise: Chamfer-distance only, NC = NaN.
     """
-    # sub-sample 防止 cKDTree OOM
     MAX_PTS = 30_000
     rng = np.random.default_rng(42)
 
     if len(pred_world_pts) > MAX_PTS:
         idx = rng.choice(len(pred_world_pts), MAX_PTS, replace=False)
-        pred_s  = pred_world_pts[idx]
-        norm_s  = pred_normals[idx] if pred_normals is not None else None
+        pred_s = pred_world_pts[idx]
     else:
-        pred_s, norm_s = pred_world_pts, pred_normals
+        pred_s = pred_world_pts.copy()
 
     gt_s = gt_pts
     if len(gt_s) > MAX_PTS:
         idx = rng.choice(len(gt_s), MAX_PTS, replace=False)
         gt_s = gt_s[idx]
 
+    # ICP fine-alignment (FastVGGT protocol: point-to-point, threshold=0.1 m)
+    if O3D_AVAILABLE:
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(pred_s.astype(np.float64))
+        pcd_gt = o3d.geometry.PointCloud()
+        pcd_gt.points = o3d.utility.Vector3dVector(gt_s.astype(np.float64))
+
+        reg = o3d.pipelines.registration.registration_icp(
+            pcd, pcd_gt, 0.1, np.eye(4),
+            o3d.pipelines.registration.TransformationEstimationPointToPoint(),
+        )
+        pcd = pcd.transform(reg.transformation)
+        pred_s = np.asarray(pcd.points, dtype=np.float32)
+
     gt_tree   = cKDTree(gt_s)
     pred_tree = cKDTree(pred_s)
 
-    # Accuracy：pred → GT
+    # Accuracy: pred → GT
     acc_d, acc_idx = gt_tree.query(pred_s, k=1)
     acc_d = np.clip(acc_d, 0.0, max_dist_m)
 
-    # Completeness：GT → pred
+    # Completeness: GT → pred
     comp_d, comp_idx = pred_tree.query(gt_s, k=1)
     comp_d = np.clip(comp_d, 0.0, max_dist_m)
 
     metrics = {
-        "acc_mean":   float(acc_d.mean()),
-        "acc_med":    float(np.median(acc_d)),
-        "comp_mean":  float(comp_d.mean()),
-        "comp_med":   float(np.median(comp_d)),
-        "nc_mean":    float("nan"),
+        "acc_mean":  float(acc_d.mean()),
+        "acc_med":   float(np.median(acc_d)),
+        "comp_mean": float(comp_d.mean()),
+        "comp_med":  float(np.median(comp_d)),
+        "nc_mean":   float("nan"),
     }
 
-    # Normal Consistency（仅在预测法向量可用时计算）
-    if norm_s is not None:
-        # 找到对应 GT 点位置的 GT 法向量（暂无 GT 法向量，用匹配对的 pred 与 pred_at_gt 对比）
-        # 实际实现：GT 侧法向量来自深度图，此处利用 pred 法向量的自一致性近似
-        # 即：对每个 GT 点，找最近 pred 点，再找该 pred 点最近的另一个 pred 点，比较法向量
-        # 这只是一个近似。正式评估应传入 gt_normals。
-        pred_nn_for_gt = pred_s[comp_idx]   # [N_gt, 3]  GT 对应的最近预测点
-        _, nn_idx2 = pred_tree.query(pred_nn_for_gt, k=2)  # k=2: [0]自身,[1]次近
-        if norm_s.ndim == 2:
-            n1 = norm_s[comp_idx]             # [N_gt, 3]
-            n2 = norm_s[nn_idx2[:, 1]]        # [N_gt, 3]
-            cos = np.clip((n1 * n2).sum(-1), -1.0, 1.0)
-            metrics["nc_mean"] = float(cos.mean())
+    # Normal consistency via Open3D estimate_normals (FastVGGT protocol)
+    if O3D_AVAILABLE:
+        search = o3d.geometry.KDTreeSearchParamHybrid(radius=0.1, max_nn=30)
+        pcd.estimate_normals(search_param=search)
+        pcd_gt.estimate_normals(search_param=search)
+        pred_n = np.asarray(pcd.normals,    dtype=np.float32)  # [N_pred, 3]
+        gt_n   = np.asarray(pcd_gt.normals, dtype=np.float32)  # [N_gt,   3]
+        if len(pred_n) > 0 and len(gt_n) > 0:
+            # NC1 (acc direction): |cos(pred_normal, matched_gt_normal)|
+            nc1 = float(np.abs((pred_n * gt_n[acc_idx]).sum(-1)).mean())
+            # NC2 (comp direction): |cos(gt_normal, matched_pred_normal)|
+            nc2 = float(np.abs((gt_n * pred_n[comp_idx]).sum(-1)).mean())
+            metrics["nc_mean"] = (nc1 + nc2) / 2.0
 
     return metrics
 
@@ -739,16 +759,8 @@ def evaluate_7scenes(model: VGGT, data: dict, dtype: torch.dtype,
     scale, R_align, t_align = umeyama_alignment(pred_cam_centers, gt_cam_centers)
     pred_pts_aligned = scale * (R_align @ pred_pts.T).T + t_align
 
-    # 计算法向量（用旋转对齐，不需要 scale/t）
-    normals_list = []
-    for s in range(S):
-        n = _compute_grid_normals(wp[s])          # [H, W, 3]
-        n_flat = n.reshape(-1, 3)
-        n_aligned = (R_align @ n_flat.T).T         # 法向量只用旋转
-        normals_list.append(n_aligned)
-    pred_normals = np.concatenate(normals_list, axis=0)[valid]
-
-    metrics = eval_point_map(pred_pts_aligned, pred_normals, gt_pts)
+    # Normals are now estimated inside eval_point_map via Open3D (FastVGGT protocol).
+    metrics = eval_point_map(pred_pts_aligned, gt_pts)
     return metrics, elapsed
 
 
@@ -855,24 +867,27 @@ def evaluate_tum(model: VGGT, data: dict, dtype: torch.dtype,
 def _scale_shift_align(pred: np.ndarray, gt: np.ndarray,
                        mask: np.ndarray) -> np.ndarray:
     """
-    Log-space 最小二乘 scale+shift 对齐（MiDaS 标准做法）：
-        s * log(pred) + b  ≈  log(gt)   (在 mask 区域)
-    等价于 aligned = pred^s * exp(b)，对各深度量级一视同仁，
-    避免线性空间下大深度主导拟合、导致小深度 abs_rel 虚高的问题。
+    Linear least-squares scale+shift alignment: a*pred + b ~= gt (on masked pixels).
+    Standard "affine-invariant" per-sequence alignment used in DPT/MiDaS and
+    adopted by Spark3R / VGGT evaluation ("per-sequence scale and shift").
+
+    Note: the previous log-space version (s*log(pred)+b~=log(gt)) is a power-law
+    fit that inflates AbsRel when the pred-gt relationship is near-linear in metric
+    scale (as with VGGT world-space depth outputs).
     """
-    valid_mask = mask & (pred > 0)
+    valid_mask = mask & np.isfinite(pred) & (pred > 0)
     if valid_mask.sum() < 10:
         return pred
-    log_pred = np.log(pred[valid_mask].astype(np.float64))
-    log_gt   = np.log(gt[valid_mask].astype(np.float64))
-    A = np.stack([log_pred, np.ones_like(log_pred)], axis=1)
+    p = pred[valid_mask].astype(np.float64)
+    g = gt[valid_mask].astype(np.float64)
+    A = np.stack([p, np.ones_like(p)], axis=1)
     try:
-        x, _, _, _ = np.linalg.lstsq(A, log_gt, rcond=None)
-        s, b = float(x[0]), float(x[1])
+        x, _, _, _ = np.linalg.lstsq(A, g, rcond=None)
+        a, b = float(x[0]), float(x[1])
     except np.linalg.LinAlgError:
         return pred
-    safe_pred = np.maximum(pred, 1e-9).astype(np.float64)
-    return np.exp(s * np.log(safe_pred) + b).astype(np.float32)
+    aligned = a * pred.astype(np.float64) + b
+    return np.clip(aligned, 1e-9, None).astype(np.float32)
 
 
 def eval_depth_sequence(pred_depth: np.ndarray,
