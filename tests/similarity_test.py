@@ -21,7 +21,7 @@ from pathlib import Path
 
 # 项目根路径注入（使脚本从任意工作目录均可运行）
 _SCRIPT_DIR = Path(__file__).resolve().parent
-_PROJECT_ROOT = _SCRIPT_DIR.parent.parent
+_PROJECT_ROOT = _SCRIPT_DIR.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
@@ -364,38 +364,38 @@ def plot_similarity_curves(feat_results: dict, kv_results: dict,
     # ── 子图 1: 相邻帧余弦相似度 ──────────────────────────────────────────
     ax = axes[0]
     ax.plot(layers, feat_results["frame_adj_sim"],  "b-o", ms=4,
-            label="feature: frame_block 后")
+            label="feature: after frame_block")
     ax.plot(layers, feat_results["global_adj_sim"], "r-s", ms=4,
-            label="feature: global_block 后")
+            label="feature: after global_block")
     ax.plot(layers, kv_results["k_adj_sim"],        "g-^", ms=4,
-            label="K-space: global_block 输入 K")
+            label="K-space: K input to global_block")
     ax.set_xlabel("Layer index")
     ax.set_ylabel("Mean cosine similarity")
-    ax.set_title("相邻帧余弦相似度（特征空间 vs K 空间）")
+    ax.set_title("Adjacent-frame cosine similarity (feature vs K-space)")
     ax.legend(fontsize=8)
     ax.grid(True, alpha=0.3)
 
-    # ── 子图 2: 全帧对余弦相似度 ──────────────────────────────────────────
+    # ── subplot 2: all-pair cosine similarity ─────────────────────────────
     ax = axes[1]
     ax.plot(layers, feat_results["frame_all_sim"],  "b-o", ms=4,
-            label="feature: frame_block 后")
+            label="feature: after frame_block")
     ax.plot(layers, feat_results["global_all_sim"], "r-s", ms=4,
-            label="feature: global_block 后")
+            label="feature: after global_block")
     ax.set_xlabel("Layer index")
     ax.set_ylabel("Mean cosine similarity (all pairs)")
-    ax.set_title("全帧对余弦相似度")
+    ax.set_title("All-pair cosine similarity")
     ax.legend(fontsize=8)
     ax.grid(True, alpha=0.3)
 
-    # ── 子图 3: 帧间方差 ──────────────────────────────────────────────────
+    # ── subplot 3: inter-frame variance ───────────────────────────────────
     ax = axes[2]
     ax.plot(layers, feat_results["frame_var"],  "b-o", ms=4,
-            label="feature: frame_block 后")
+            label="feature: after frame_block")
     ax.plot(layers, feat_results["global_var"], "r-s", ms=4,
-            label="feature: global_block 后")
+            label="feature: after global_block")
     ax.set_xlabel("Layer index")
     ax.set_ylabel("Inter-frame token variance")
-    ax.set_title("帧间 token 方差（越大 = 越分化）")
+    ax.set_title("Inter-frame token variance (higher = more diverse)")
     ax.legend(fontsize=8)
     ax.grid(True, alpha=0.3)
 
@@ -417,7 +417,7 @@ def plot_kv_curves(kv_results: dict, output_dir: str) -> None:
     ax.plot(layers, kv_results["k_adj_sim"], "g-^", ms=4)
     ax.set_xlabel("Layer index")
     ax.set_ylabel("K cosine similarity (adjacent frames)")
-    ax.set_title("K 空间相邻帧余弦相似度（头平均）\n（越高 = K 越相似 = P帧可压缩）")
+    ax.set_title("K-space adjacent-frame cosine sim (head-avg)\n(higher = more similar K = more compressible)")
     ax.grid(True, alpha=0.3)
     ax.set_ylim(0, 1)
 
@@ -425,14 +425,14 @@ def plot_kv_curves(kv_results: dict, output_dir: str) -> None:
     ax.plot(layers, kv_results["v_reldelta"], "m-v", ms=4)
     ax.set_xlabel("Layer index")
     ax.set_ylabel("V relative L2 delta (adjacent frames)")
-    ax.set_title("V 空间相邻帧相对 L2 变化量\n（越大 = V 内容差异越大）")
+    ax.set_title("V-space adjacent-frame relative L2 delta\n(higher = more content change in V)")
     ax.grid(True, alpha=0.3)
 
     ax = axes[2]
     ax.plot(layers, kv_results["kv_joint_score"], "k-D", ms=4)
     ax.set_xlabel("Layer index")
     ax.set_ylabel("K+V joint difference score")
-    ax.set_title("K+V 联合差异分数（越高 = 越不可舍弃）")
+    ax.set_title("K+V joint difference score (higher = less compressible)")
     ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
@@ -461,10 +461,10 @@ def plot_spatial_heatmaps(frame_maps: list[np.ndarray],
         return
 
     row_labels = [
-        "feature: frame_block 后",
-        "feature: global_block 后",
-        "K-space 余弦相似度",
-        "K+V 联合差异分数（高=保留）",
+        "feature: after frame_block",
+        "feature: after global_block",
+        "K-space cosine similarity",
+        "K+V joint diff score (high=keep)",
     ]
     row_data = [frame_maps, global_maps, k_maps, kv_maps]
     cmaps    = ["RdYlGn", "RdYlGn", "RdYlGn", "RdYlBu"]
@@ -483,7 +483,7 @@ def plot_spatial_heatmaps(frame_maps: list[np.ndarray],
             axes[row, col].axis("off")
             plt.colorbar(im, ax=axes[row, col], fraction=0.046)
 
-    plt.suptitle("空间位置分辨热力图（37×37 patch 网格）", fontsize=13)
+    plt.suptitle("Spatial heatmaps (37x37 patch grid)", fontsize=13)
     plt.tight_layout()
     out_path = os.path.join(output_dir, "spatial_heatmaps.png")
     plt.savefig(out_path, dpi=150)
@@ -502,8 +502,8 @@ def plot_delta_similarity(feat_results: dict, output_dir: str) -> None:
     ax.bar(layers, delta, color=colors, alpha=0.8)
     ax.axhline(0, color="black", linewidth=0.8)
     ax.set_xlabel("Layer index")
-    ax.set_ylabel("Δ cosine similarity\n(global_block 后 − frame_block 后)")
-    ax.set_title("每层 global_block 对帧间相似度的影响\n（负 = 分化；正 = 均质化）")
+    ax.set_ylabel("Delta cosine similarity\n(after global_block - after frame_block)")
+    ax.set_title("Effect of global_block on inter-frame similarity per layer\n(negative = more diverse; positive = more homogeneous)")
     ax.grid(True, alpha=0.3, axis="y")
     plt.tight_layout()
     out_path = os.path.join(output_dir, "delta_similarity.png")
@@ -532,9 +532,9 @@ def plot_feature_vs_k_scatter(feat_results: dict, kv_results: dict,
     lo = min(x.min(), y.min()) - 0.02
     hi = max(x.max(), y.max()) + 0.02
     ax.plot([lo, hi], [lo, hi], "k--", linewidth=0.8, label="y = x")
-    ax.set_xlabel("Feature-space cosine sim (global_block 后)")
+    ax.set_xlabel("Feature-space cosine sim (after global_block)")
     ax.set_ylabel("K-space cosine sim")
-    ax.set_title("特征空间 vs K 空间相邻帧相似度\n（标签 = 层索引，颜色深 = 深层）")
+    ax.set_title("Feature-space vs K-space adjacent-frame cosine sim\n(labels = layer index, darker = deeper layer)")
     sm = plt.cm.ScalarMappable(cmap="viridis",
                                 norm=plt.Normalize(0, n - 1))
     plt.colorbar(sm, ax=ax, label="Layer index")
@@ -565,10 +565,10 @@ def plot_p_frame_budget(kv_per_pos: dict, output_dir: str,
         ax.plot(layers, ratios, "-o", ms=4, label=f"τ = {tau}")
 
     ax.set_xlabel("Layer index")
-    ax.set_ylabel("Token drop ratio (K sim > τ)")
+    ax.set_ylabel("Token drop ratio (K sim > tau)")
     ax.set_title(
-        "P 帧压缩：各层不同阈值下可舍弃的 token 比例\n"
-        "（越高 = 该层 KV 冗余度越大 = 压缩收益越高）"
+        "P-frame compression: token drop ratio per layer at various thresholds\n"
+        "(higher = more KV redundancy = higher compression benefit)"
     )
     ax.legend(fontsize=9)
     ax.grid(True, alpha=0.3)
