@@ -100,6 +100,10 @@ class CompressionConfig:
     d2_similarity_policy: str = "lowest"  # "lowest"=删最低相似配对（保留可靠对应关系，用于位姿估计）
     d2_apply_to_q: bool = False            # 首版建议仅删 KV，避免 Q 路径过敏感
 
+    # ── 方案 D3 的 K 相似度阈值参数 ──────────────────────────────────────
+    d3_threshold: float = 0.90            # K 余弦相似度超过此值则删除（I/P 帧式压缩）
+    d3_reference: str = "adjacent"        # "adjacent"=s vs s-1；"first"=所有帧 vs 帧 0
+
     # ── 方案 F 的显著 token 选择参数 ─────────────────────────────────────
     f_keep_ratio_by_zone: Dict[str, float] = field(default_factory=lambda: {
         "shallow": 0.35,
