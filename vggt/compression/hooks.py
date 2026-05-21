@@ -6,6 +6,7 @@ from .mechanism_b import TemporalDCTKVCompression
 from .mechanism_c import Spatial2DDCTCompression
 from .mechanism_c1 import FixedBandSpatialCompression
 from .mechanism_d2 import LocalRedundancyPairPruning
+from .mechanism_d3 import ThresholdKSimilarityPruning
 from .mechanism_e import QueryDCTMerging
 from .mechanism_f import LowSimilaritySaliencyPruning
 
@@ -32,6 +33,8 @@ def apply_compression_hooks(model, config: CompressionConfig) -> None:
         hook = FixedBandSpatialCompression(config)
     elif mechanism == "D2":
         hook = LocalRedundancyPairPruning(config)
+    elif mechanism == "D3":
+        hook = ThresholdKSimilarityPruning(config)
     elif mechanism == "E":
         hook = QueryDCTMerging(config)
     elif mechanism == "F":
