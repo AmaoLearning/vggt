@@ -123,13 +123,67 @@ def build_compression_configs() -> Dict[str, Optional[object]]:
         return configs
 
     configs.update({
-        # 机制 A：KV 时序步长剪枝 + Q 组内合并（完整 Spark3R 对应）
-        "A_full": CompressionConfig(
+#        # 机制 A：KV 时序步长剪枝 + Q 组内合并（完整 Spark3R 对应）
+#        "A_2": CompressionConfig(
+#            mechanism="A",
+#            q_group_size=20,
+#            kv_insensitive_multiplier=2.0,
+#            enable_q_compression=True,
+#        ),
+        "A_3": CompressionConfig(
             mechanism="A",
             q_group_size=20,
             kv_insensitive_multiplier=3.0,
             enable_q_compression=True,
         ),
+#        "A_4": CompressionConfig(
+#            mechanism="A",
+#            q_group_size=20,
+#            kv_insensitive_multiplier=4.0,
+#            enable_q_compression=True,
+#        ),
+#        "A_5": CompressionConfig(
+#            mechanism="A",
+#            q_group_size=20,
+#            kv_insensitive_multiplier=5.0,
+#            enable_q_compression=True,
+#        ),
+#        "A_6": CompressionConfig(
+#            mechanism="A",
+#            q_group_size=20,
+#            kv_insensitive_multiplier=6.0,
+#            enable_q_compression=True,
+#        ),
+#        "A_7": CompressionConfig(
+#            mechanism="A",
+#            q_group_size=20,
+#            kv_insensitive_multiplier=7.0,
+#            enable_q_compression=True,
+#        ),
+#        "A_8": CompressionConfig(
+#            mechanism="A",
+#            q_group_size=20,
+#            kv_insensitive_multiplier=8.0,
+#            enable_q_compression=True,
+#        ),
+#        "A_10": CompressionConfig(
+#            mechanism="A",
+#            q_group_size=20,
+#            kv_insensitive_multiplier=10.0,
+#            enable_q_compression=True,
+#        ),
+#        "A_16": CompressionConfig(
+#            mechanism="A",
+#            q_group_size=20,
+#            kv_insensitive_multiplier=16.0,
+#            enable_q_compression=True,
+#        ),
+#        "A_32": CompressionConfig(
+#            mechanism="A",
+#            q_group_size=20,
+#            kv_insensitive_multiplier=32.0,
+#            enable_q_compression=True,
+#        ),
 #        # 机制 A（仅 KV，用于与 B/C 公平对比）
 #        "A_kv_only": CompressionConfig(
 #            mechanism="A",
@@ -153,16 +207,16 @@ def build_compression_configs() -> Dict[str, Optional[object]]:
 #            spatial_outlier_ratio=0.10,
 #        ),
 #        # 方案 C1：固定空间频带表（90% 保能，保留现有名称便于兼容旧用法）
-#        "C1": CompressionConfig(
-#            mechanism="C1",
-#            c1_energy_target=0.90,
-#            c1_enable_q_compression=False,
-#            c1_reconstruct_mode="lowres_idct",
-#        ),
 #        # 方案 C1：固定空间频带表（95% / 80% / 50% 保能并行对比）
 #        "C1_95": CompressionConfig(
 #            mechanism="C1",
 #            c1_energy_target=0.95,
+#            c1_enable_q_compression=False,
+#            c1_reconstruct_mode="lowres_idct",
+#        ),
+#        "C1_90": CompressionConfig(
+#            mechanism="C1",
+#            c1_energy_target=0.90,
 #            c1_enable_q_compression=False,
 #            c1_reconstruct_mode="lowres_idct",
 #        ),
@@ -178,58 +232,128 @@ def build_compression_configs() -> Dict[str, Optional[object]]:
 #            c1_enable_q_compression=False,
 #            c1_reconstruct_mode="lowres_idct",
 #        ),
-        # 方案 D2：相邻帧局部冗余对删除
-        "D2": CompressionConfig(
-            mechanism="D2",
-            d2_window_radius=2,
-            d2_drop_ratio=0.50,
-            d2_similarity_policy="highest",
-        ),
-        "D3_99": CompressionConfig(
-            mechanism="D3",
-            d3_reference="adjacent",
-            d3_threshold=0.99
-        ),
-        "D3_95": CompressionConfig(
-            mechanism="D3",
-            d3_reference="adjacent",
-            d3_threshold=0.95
-        ),
-        "D3_90": CompressionConfig(
-            mechanism="D3",
-            d3_reference="adjacent",
-            d3_threshold=0.90
-        ),
-        "D3_80": CompressionConfig(
-            mechanism="D3",
-            d3_reference="adjacent",
-            d3_threshold=0.80
-        ),
-        "D3_70": CompressionConfig(
-            mechanism="D3",
-            d3_reference="adjacent",
-            d3_threshold=0.70
-        ),
-        "D3_60": CompressionConfig(
-            mechanism="D3",
-            d3_reference="adjacent",
-            d3_threshold=0.60
-        ),
-        "D3_50": CompressionConfig(
-            mechanism="D3",
-            d3_reference="adjacent",
-            d3_threshold=0.50
-        ),
-        "D3_10": CompressionConfig(
-            mechanism="D3",
-            d3_reference="adjacent",
-            d3_threshold=0.10
-        ),
-        "D3_first": CompressionConfig(
-            mechanism="D3",
-            d3_reference="first",
-            d3_threshold=0.90
-        ),
+#        # 方案 D2：相邻帧局部冗余对删除
+#        "D2_10": CompressionConfig(
+#            mechanism="D2",
+#            d2_window_radius=2,
+#            d2_drop_ratio=0.90,
+#            d2_similarity_policy="highest",
+#        ),
+#        "D2_20": CompressionConfig(
+#            mechanism="D2",
+#            d2_window_radius=2,
+#            d2_drop_ratio=0.80,
+#            d2_similarity_policy="highest",
+#        ),
+#        "D2_30": CompressionConfig(
+#            mechanism="D2",
+#            d2_window_radius=2,
+#            d2_drop_ratio=0.70,
+#            d2_similarity_policy="highest",
+#        ),
+#        "D2_40": CompressionConfig(
+#            mechanism="D2",
+#            d2_window_radius=2,
+#            d2_drop_ratio=0.60,
+#            d2_similarity_policy="highest",
+#        ),
+#        "D2_50": CompressionConfig(
+#            mechanism="D2",
+#            d2_window_radius=2,
+#            d2_drop_ratio=0.50,
+#            d2_similarity_policy="highest",
+#        ),
+#        "D2_60": CompressionConfig(
+#            mechanism="D2",
+#            d2_window_radius=2,
+#            d2_drop_ratio=0.40,
+#            d2_similarity_policy="highest",
+#        ),
+#        "D2_80": CompressionConfig(
+#            mechanism="D2",
+#            d2_window_radius=2,
+#            d2_drop_ratio=0.20,
+#            d2_similarity_policy="highest",
+#        ),
+#        "D2_90": CompressionConfig(
+#            mechanism="D2",
+#            d2_window_radius=2,
+#            d2_drop_ratio=0.10,
+#            d2_similarity_policy="highest",
+#        ),
+#        "D2_10_l": CompressionConfig(
+#            mechanism="D2",
+#            d2_window_radius=2,
+#            d2_drop_ratio=0.90,
+#            d2_similarity_policy="lowest",
+#        ),
+#        "D2_50_l": CompressionConfig(
+#            mechanism="D2",
+#            d2_window_radius=2,
+#            d2_drop_ratio=0.50,
+#            d2_similarity_policy="lowest",
+#        ),
+#        "D2_90_l": CompressionConfig(
+#            mechanism="D2",
+#            d2_window_radius=2,
+#            d2_drop_ratio=0.10,
+#            d2_similarity_policy="lowest",
+#        ),
+#        "D3_99": CompressionConfig(
+#            mechanism="D3",
+#            d3_reference="adjacent",
+#            d3_threshold=0.99
+#        ),
+#        "D3_95": CompressionConfig(
+#            mechanism="D3",
+#            d3_reference="adjacent",
+#            d3_threshold=0.95
+#        ),
+#        "D3_90": CompressionConfig(
+#            mechanism="D3",
+#            d3_reference="adjacent",
+#            d3_threshold=0.90
+#        ),
+#        "D3_80": CompressionConfig(
+#            mechanism="D3",
+#            d3_reference="adjacent",
+#            d3_threshold=0.80
+#        ),
+#        "D3_70": CompressionConfig(
+#            mechanism="D3",
+#            d3_reference="adjacent",
+#            d3_threshold=0.70
+#        ),
+#        "D3_60": CompressionConfig(
+#            mechanism="D3",
+#            d3_reference="adjacent",
+#            d3_threshold=0.60
+#        ),
+#        "D3_50": CompressionConfig(
+#            mechanism="D3",
+#            d3_reference="adjacent",
+#            d3_threshold=0.50
+#        ),
+#        "D3_10": CompressionConfig(
+#            mechanism="D3",
+#            d3_reference="adjacent",
+#            d3_threshold=0.10
+#        ),
+#        "D3_90_first": CompressionConfig(
+#            mechanism="D3",
+#            d3_reference="first",
+#            d3_threshold=0.90
+#        ),
+#        "D3_50_first": CompressionConfig(
+#            mechanism="D3",
+#            d3_reference="first",
+#            d3_threshold=0.50
+#        ),
+#        "D3_10_first": CompressionConfig(
+#            mechanism="D3",
+#            d3_reference="first",
+#            d3_threshold=0.10
+#        ),
 #        # 机制 E：DCT 代表元 Q merging
 #        "E": CompressionConfig(
 #            mechanism="E",
@@ -237,16 +361,48 @@ def build_compression_configs() -> Dict[str, Optional[object]]:
 #            kv_insensitive_multiplier=3.0,
 #            enable_q_compression=True,
 #        ),
-        # 方案 F：低相似显著 token 保留
-        "F": CompressionConfig(
+        # 方案 F：FastVGGT复现
+        "F_90_10": CompressionConfig(
             mechanism="F",
-            f_dst_policy="next_frame",
-            f_match_mode="global",
-            f_keep_ratio_by_zone={
-                "shallow": 0.35,
-                "sensitive": 0.60,
-                "deep": 0.45,
-            },
+            f_merge_ratio=0.9,
+            f_start_layer=0,
+            f_region_stride=2,
+            f_salient_stride=10,
+        ),
+        "F_70": CompressionConfig(
+            mechanism="F",
+            f_merge_ratio=0.7,
+            f_start_layer=0,
+            f_region_stride=2,
+            f_salient_stride=10,
+        ),
+        "F_50": CompressionConfig(
+            mechanism="F",
+            f_merge_ratio=0.5,
+            f_start_layer=0,
+            f_region_stride=2,
+            f_salient_stride=10,
+        ),
+        "F_90_5": CompressionConfig(
+            mechanism="F",
+            f_merge_ratio=0.9,
+            f_start_layer=0,
+            f_region_stride=2,
+            f_salient_stride=5,
+        ),
+        "F_90_15": CompressionConfig(
+            mechanism="F",
+            f_merge_ratio=0.9,
+            f_start_layer=0,
+            f_region_stride=2,
+            f_salient_stride=15,
+        ),
+        "F_90_20": CompressionConfig(
+            mechanism="F",
+            f_merge_ratio=0.9,
+            f_start_layer=0,
+            f_region_stride=2,
+            f_salient_stride=20,
         ),
 #        # 联合：机制 A + C（时序 + 空间双级压缩）
 #        "A+C": CompressionConfig(
