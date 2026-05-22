@@ -7,7 +7,7 @@ from .mechanism_c1 import FixedBandSpatialCompression
 from .mechanism_d2 import LocalRedundancyPairPruning
 from .mechanism_d3 import ThresholdKSimilarityPruning
 from .mechanism_e import QueryDCTMerging
-from .mechanism_f import LowSimilaritySaliencyPruning
+from .mechanism_f import FastVGGTTokenMerging
 from .hooks import apply_compression_hooks, remove_compression_hooks, CombinedHook
 
 __all__ = [
@@ -21,7 +21,7 @@ __all__ = [
     "LocalRedundancyPairPruning",
     "ThresholdKSimilarityPruning",
     "QueryDCTMerging",
-    "LowSimilaritySaliencyPruning",
+    "FastVGGTTokenMerging",
     "apply_compression_hooks",
     "remove_compression_hooks",
     "CombinedHook",

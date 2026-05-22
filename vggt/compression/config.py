@@ -53,7 +53,7 @@ class CompressionConfig:
         C1:  依据离线 DCT 统计表的固定空间频带截断（Q/K/V 可分支配置）
         D2:  相邻帧小窗口局部冗余对删除
         E:   DCT 代表元 Q merging（替代机制 A 的 Q 路径）
-        F:   FastVGGT 风格低相似显著 token 保留（以低相似度替代高范数打分）
+        F:   FastVGGT (ICLR 2026) bipartite token merging，对 Global Attention 全序列（Q/K/V）做 merge/unmerge
         A+C: 机制 A（KV时序） + 机制 C（KV空间），联合压缩
         E+C: 机制 E（Q路径） + 机制 A KV路径 + 机制 C（KV空间）
     """
@@ -104,15 +104,11 @@ class CompressionConfig:
     d3_threshold: float = 0.90            # K 余弦相似度超过此值则删除（I/P 帧式压缩）
     d3_reference: str = "adjacent"        # "adjacent"=s vs s-1；"first"=所有帧 vs 帧 0
 
-    # ── 方案 F 的显著 token 选择参数 ─────────────────────────────────────
-    f_keep_ratio_by_zone: Dict[str, float] = field(default_factory=lambda: {
-        "shallow": 0.35,
-        "sensitive": 0.60,
-        "deep": 0.45,
-    })
-    f_dst_policy: str = "anchor_frame"      # "next_frame" | "prev_frame" | "anchor_frame"
-    f_match_mode: str = "global"          # "global"=全量匹配；"window"=局部窗口加速
-    f_window_radius: int = 2               # window 模式下的邻域半径
+    # ── 方案 F（FastVGGT Token Merging）参数 ────────────────────────────────
+    f_merge_ratio: float = 0.9       # 目标合并比例（占全序列长度 N）；实际 = min(r, num_src)
+    f_start_layer: int = 0           # 从第几个 global block 开始启用 merging（0=全部层）
+    f_region_stride: int = 2         # region-based dst 采样步长 sy=sx（FastVGGT 默认 2）
+    f_salient_stride: int = 10       # 每 K 个 patch token 取 1 个 salient（≈10% per frame）
 
     # ── 通用 ─────────────────────────────────────────────────────────────
     only_global: bool = True    # 仅压缩 global_blocks（推荐）
@@ -179,11 +175,4 @@ def get_c1_spatial_band_upper(layer_idx: int, branch: str, target_ratio: float) 
     return C1_SPATIAL_BAND_TABLES[matched_ratio][branch][layer_idx]
 
 
-def get_f_keep_ratio(layer_idx: int, config: "CompressionConfig") -> float:
-    """根据层编号返回方案 F 的保留比例。"""
-    if layer_idx in LAYER_ZONE["shallow"]:
-        return config.f_keep_ratio_by_zone["shallow"]
-    elif layer_idx in LAYER_ZONE["sensitive"]:
-        return config.f_keep_ratio_by_zone["sensitive"]
-    else:
-        return config.f_keep_ratio_by_zone["deep"]
+

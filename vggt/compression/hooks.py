@@ -8,7 +8,7 @@ from .mechanism_c1 import FixedBandSpatialCompression
 from .mechanism_d2 import LocalRedundancyPairPruning
 from .mechanism_d3 import ThresholdKSimilarityPruning
 from .mechanism_e import QueryDCTMerging
-from .mechanism_f import LowSimilaritySaliencyPruning
+from .mechanism_f import FastVGGTTokenMerging
 
 
 def apply_compression_hooks(model, config: CompressionConfig) -> None:
@@ -38,7 +38,7 @@ def apply_compression_hooks(model, config: CompressionConfig) -> None:
     elif mechanism == "E":
         hook = QueryDCTMerging(config)
     elif mechanism == "F":
-        hook = LowSimilaritySaliencyPruning(config)
+        hook = FastVGGTTokenMerging(config)
     elif mechanism == "A+C":
         hook = CombinedHook(
             TemporalStridePruning(config),
