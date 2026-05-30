@@ -158,6 +158,7 @@ def get_temporal_keep_ratio(layer_idx: int, config: "CompressionConfig") -> floa
         return config.temporal_keep_ratio_by_zone["deep"]
 
 
+
 def get_c1_spatial_band_upper(layer_idx: int, branch: str, target_ratio: float) -> int:
     """根据离线统计表返回 C1 的空间频带上限。"""
     matched_ratio = None

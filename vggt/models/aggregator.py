@@ -9,7 +9,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
-from typing import Optional, Tuple, Union, List, Dict, Any
+from typing import Optional, Tuple, Union, List, Dict, Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from vggt.compression.mechanism_g import DPPConfig, DPPTokenSelector
 
 from vggt.layers import PatchEmbed
 from vggt.layers.block import Block
@@ -140,6 +143,29 @@ class Aggregator(nn.Module):
 
         self.use_reentrant = False # hardcoded to False
 
+        # DPP Attention（默认禁用；调用 enable_dpp() 后启用）
+        self.dpp_selector: Optional["DPPTokenSelector"] = None
+        self._dpp_cfg: Optional["DPPConfig"] = None
+        self._dpp_cached_idx: Optional[torch.Tensor] = None
+
+    def enable_dpp(self, cfg: "DPPConfig") -> None:
+        """
+        启用 DPP Attention（推理前调用）。
+
+        Args:
+            cfg: DPPConfig 实例，控制 keep_ratio / window_size 等超参。
+        """
+        from vggt.compression.mechanism_g import DPPTokenSelector
+        self.dpp_selector    = DPPTokenSelector(cfg)
+        self._dpp_cfg        = cfg
+        self._dpp_cached_idx = None  # 重置跨层缓存
+
+    def disable_dpp(self) -> None:
+        """关闭 DPP Attention，恢复原始全序列 Global Attention。"""
+        self.dpp_selector    = None
+        self._dpp_cfg        = None
+        self._dpp_cached_idx = None
+
     def __build_patch_embed__(
         self,
         patch_embed,
@@ -193,6 +219,9 @@ class Aggregator(nn.Module):
                 and the patch_start_idx indicating where patch tokens begin.
         """
         B, S, C_in, H, W = images.shape
+
+        # 每次 forward 重置 DPP 缓存（on_all_layers=False 模式下每序列只算一次）
+        self._dpp_cached_idx = None
 
         if C_in != 3:
             raise ValueError(f"Expected 3 input channels, got {C_in}")
@@ -284,6 +313,7 @@ class Aggregator(nn.Module):
     def _process_global_attention(self, tokens, B, S, P, C, global_idx, pos=None):
         """
         Process global attention blocks. We keep tokens in shape (B, S*P, C).
+        When dpp_selector is set, each block uses DPP token reduction before attention.
         """
         if tokens.shape != (B, S * P, C):
             tokens = tokens.view(B, S, P, C).view(B, S * P, C)
@@ -295,23 +325,141 @@ class Aggregator(nn.Module):
 
         # by default, self.aa_block_size=1, which processes one block at a time
         for _ in range(self.aa_block_size):
-            # ── 写入压缩上下文 ───────────────────────────────────────────
-            attn_module = self.global_blocks[global_idx].attn
-            if attn_module._compression_ctx is not None:
-                attn_module._compression_ctx.S = S
-                attn_module._compression_ctx.P = P
-                attn_module._compression_ctx.layer_idx = global_idx
-                attn_module._compression_ctx.is_global = True
-            # ─────────────────────────────────────────────────────────────
-
-            if self.training:
-                tokens = checkpoint(self.global_blocks[global_idx], tokens, pos, use_reentrant=self.use_reentrant)
+            if self.dpp_selector is not None:
+                # ── DPP 压缩路径 ──────────────────────────────────────────
+                tokens, pos = self._dpp_global_block(
+                    tokens, B, S, P, C, global_idx, pos
+                )
             else:
-                tokens = self.global_blocks[global_idx](tokens, pos=pos)
+                # ── 原始全序列路径 ────────────────────────────────────────
+                # 写入压缩上下文（其他 hook 可能需要）
+                attn_module = self.global_blocks[global_idx].attn
+                if hasattr(attn_module, '_compression_ctx') and attn_module._compression_ctx is not None:
+                    attn_module._compression_ctx.S = S
+                    attn_module._compression_ctx.P = P
+                    attn_module._compression_ctx.layer_idx = global_idx
+                    attn_module._compression_ctx.is_global = True
+
+                if self.training:
+                    tokens = checkpoint(self.global_blocks[global_idx], tokens, pos, use_reentrant=self.use_reentrant)
+                else:
+                    tokens = self.global_blocks[global_idx](tokens, pos=pos)
+
             global_idx += 1
             intermediates.append(tokens.view(B, S, P, C))
 
         return tokens, global_idx, intermediates
+
+    def _dpp_global_block(
+        self,
+        tokens:     torch.Tensor,            # [B, S*P, C]
+        B:          int,
+        S:          int,
+        P:          int,
+        C:          int,
+        global_idx: int,
+        pos:        Optional[torch.Tensor],  # [B, S*P, 2] 或 None
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """
+        单层 DPP 压缩 Global Attention。
+
+        流程：
+            1. 计算（或复用）每帧 patch token 的 DPP 子集索引
+            2. Gather：将压缩后的序列 [B, S*(N_sp+M), C] 送入 global block
+            3. Scatter Back：将 global 输出写回原始全序列位置
+
+        Returns:
+            tokens : [B, S*P, C]  更新后的完整 token 序列
+            pos    : [B, S*P, 2] 或 None（形状保持不变）
+        """
+        cfg  = self._dpp_cfg
+        N_sp = self.patch_start_idx        # 5（1 camera + 4 register）
+        N    = P - N_sp                    # 1369 patch token / 帧
+
+        # patch_h / patch_w：假设 patch token 排布为正方形网格
+        patch_h = patch_w = int(round(N ** 0.5))
+        # 若 N 不是完全平方数（极少见），退化回全序列，避免崩溃
+        if patch_h * patch_w != N:
+            logger.warning(
+                f"DPP Attention: N={N} 不是完全平方数，跳过压缩（层 {global_idx}）"
+            )
+            if self.training:
+                return checkpoint(
+                    self.global_blocks[global_idx], tokens, pos,
+                    use_reentrant=self.use_reentrant
+                ), pos
+            return self.global_blocks[global_idx](tokens, pos=pos), pos
+
+        tokens_4d = tokens.view(B, S, P, C)
+
+        # ── 1. 计算或复用 DPP 索引 ───────────────────────────────────────
+        if cfg.on_all_layers or self._dpp_cached_idx is None:
+            # 取 batch=0 的 patch token 作为代表（推理时 B=1；训练时共享索引）
+            patch_tok = tokens_4d[0, :, N_sp:, :].detach()   # [S, N, C]
+            select_idx = self.dpp_selector.select(
+                patch_tok, patch_h, patch_w
+            )                                                   # [S, M]
+            if not cfg.on_all_layers:
+                # on_all_layers=False：缓存供后续层复用
+                self._dpp_cached_idx = select_idx
+        else:
+            select_idx = self._dpp_cached_idx                  # [S, M]
+
+        M = select_idx.shape[1]
+
+        # ── 2. Gather 压缩序列 ────────────────────────────────────────────
+        # 目标：[B, S*(N_sp+M), C]；每帧布局 [special(N_sp) | selected_patch(M)]
+        pos_4d = pos.view(B, S, P, 2) if pos is not None else None
+
+        comp_tok_list: List[torch.Tensor] = []
+        comp_pos_list: Optional[List[torch.Tensor]] = [] if pos_4d is not None else None
+
+        for s in range(S):
+            sp_tok  = tokens_4d[:, s, :N_sp, :]              # [B, N_sp, C]
+            pt_tok  = tokens_4d[:, s, N_sp:, :]              # [B, N, C]
+            sel_tok = pt_tok[:, select_idx[s], :]             # [B, M, C]
+            comp_tok_list.append(torch.cat([sp_tok, sel_tok], dim=1))  # [B, N_sp+M, C]
+
+            if pos_4d is not None:
+                sp_pos  = pos_4d[:, s, :N_sp, :]              # [B, N_sp, 2]
+                pt_pos  = pos_4d[:, s, N_sp:, :]              # [B, N, 2]
+                sel_pos = pt_pos[:, select_idx[s], :]          # [B, M, 2]
+                comp_pos_list.append(torch.cat([sp_pos, sel_pos], dim=1))
+
+        comp_tokens = torch.cat(comp_tok_list, dim=1)          # [B, S*(N_sp+M), C]
+        comp_pos    = torch.cat(comp_pos_list, dim=1) if comp_pos_list is not None else None
+
+        # ── 3. 压缩序列经 Global Attention Block ─────────────────────────
+        if self.training:
+            comp_out = checkpoint(
+                self.global_blocks[global_idx], comp_tokens, comp_pos,
+                use_reentrant=self.use_reentrant
+            )
+        else:
+            comp_out = self.global_blocks[global_idx](comp_tokens, pos=comp_pos)
+        # comp_out: [B, S*(N_sp+M), C]
+
+        # ── 4. Scatter Back ───────────────────────────────────────────────
+        comp_out_4d = comp_out.view(B, S, N_sp + M, C)
+
+        # 以 frame attention 输出（tokens_4d）为基础，仅覆盖被选 token
+        out_4d = tokens_4d.clone()
+
+        for s in range(S):
+            idx_s = select_idx[s]                              # [M]
+            # 更新特殊 token
+            out_4d[:, s, :N_sp, :]         = comp_out_4d[:, s, :N_sp, :]
+            # 更新被选 patch token
+            # 使用 index_put 保证梯度正确流动
+            out_4d[:, s, N_sp:, :] = out_4d[:, s, N_sp:, :].clone().index_put(
+                (torch.arange(B, device=tokens.device).unsqueeze(-1),
+                 idx_s.unsqueeze(0).expand(B, -1)),
+                comp_out_4d[:, s, N_sp:, :],
+            )
+            # 未被选的 patch token 保持 frame attention 输出不变（已通过 clone 保留）
+
+        # pos 保持原始全序列形状（下层 frame block 需要完整 pos）
+        return out_4d.view(B, S * P, C), pos
 
 
 def slice_expand_and_flatten(token_tensor, B, S):
