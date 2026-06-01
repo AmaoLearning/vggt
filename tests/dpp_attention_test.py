@@ -213,6 +213,99 @@ def build_dpp_configs() -> Dict[str, Optional["DPPConfig"]]:
             proj_dim        = 64,
         )
 
+    # ── G2_kr*：修正 relevance 方向 + max_map_steps=128 的 DPP（v2 对照） ────
+    # 上一版本 relevance = 1 - max_sim（越不稳定越高），方向反了。
+    # 本版本使用 (1+max_sim)/2（越稳定越高），且限制 MAP 步数为 128。
+    # 对比 G_kr* 可单独量化「relevance 方向」这一变量的影响。
+    for kr, name in [
+        (0.90, "G2_kr90"),
+        (0.70, "G2_kr70"),
+        (0.50, "G2_kr50"),
+        (0.30, "G2_kr30"),
+        (0.10, "G2_kr10"),
+    ]:
+        configs[name] = DPPConfig(
+            keep_ratio      = kr,
+            window_size     = 3,
+            num_adj_frames  = -1,
+            relevance_agg   = "max",
+            on_all_layers   = True,
+            selection_mode  = "dpp",
+            proj_dim        = 64,
+            max_map_steps   = 128,
+        )
+
+    # ── G2_full_kr*：修正 relevance + 完整 Greedy MAP（max_map_steps=0）────
+    # max_map_steps=0 = 不限制，等价于原始 DPP 对所有 M 个 token 运行 MAP。
+    # 提供 DPP 选择质量的上界（最准确），但速度最慢（见 §10.6.3 线性延迟分析）。
+    # 与 G2_kr* 对比可量化「partial DPP (128步+随机填充) vs full DPP」的质量差距。
+    for kr, name in [
+        (0.90, "G2_full_kr90"),
+        (0.70, "G2_full_kr70"),
+        (0.50, "G2_full_kr50"),
+        (0.30, "G2_full_kr30"),
+        (0.10, "G2_full_kr10"),
+    ]:
+        configs[name] = DPPConfig(
+            keep_ratio      = kr,
+            window_size     = 3,
+            num_adj_frames  = -1,
+            relevance_agg   = "max",
+            on_all_layers   = True,
+            selection_mode  = "dpp",
+            proj_dim        = 64,
+            max_map_steps   = 0,    # 不限制：完整 MAP
+        )
+
+    # ── G_topK_stable_kr*：纯 relevance Top-K（无 DPP diversity）──────────
+    # 等价于只用 relevance 排序取前 M 个最稳定 token，不考虑帧内多样性。
+    # 与 R_kr* 对比：验证「稳定性选择单独是否有益」（§10.6.5 实验 A）。
+    # 与 G2_kr* 对比：验证「DPP diversity 在稳定性 relevance 上的增量价值」（实验 B）。
+    for kr, name in [
+        (0.90, "G_topK_stable_kr90"),
+        (0.70, "G_topK_stable_kr70"),
+        (0.50, "G_topK_stable_kr50"),
+        (0.30, "G_topK_stable_kr30"),
+        (0.10, "G_topK_stable_kr10"),
+    ]:
+        configs[name] = DPPConfig(
+            keep_ratio      = kr,
+            window_size     = 3,
+            num_adj_frames  = -1,
+            relevance_agg   = "max",
+            on_all_layers   = True,
+            selection_mode  = "topk_stable",
+            proj_dim        = 64,
+        )
+
+    # ── MAP 步数消融（固定 kr=0.50）──────────────────────────────────────────
+    # 在相同 keep_ratio 下，逐步增加 DPP anchor token 数量，其余 slot 随机填充。
+    # 回答：「需要多少步 DPP MAP 质量才达到饱和？」
+    #   steps=0   (full, M=685)  ← G2_full_kr50
+    #   steps=512                ← G2_map512_kr50
+    #   steps=256                ← G2_map256_kr50
+    #   steps=128                ← G2_kr50（已有）
+    #   steps=64                 ← G2_map64_kr50
+    #   steps=32                 ← G2_map32_kr50
+    #   pure random              ← R_kr50（已有）
+    for steps, name in [
+        (512, "G2_map512_kr50"),
+        (256, "G2_map256_kr50"),
+        # 128 → G2_kr50 已存在，此处跳过
+        ( 64, "G2_map64_kr50"),
+        ( 32, "G2_map32_kr50"),
+    ]:
+        configs[name] = DPPConfig(
+            keep_ratio      = 0.50,
+            window_size     = 3,
+            num_adj_frames  = -1,
+            relevance_agg   = "max",
+            on_all_layers   = True,
+            selection_mode  = "dpp",
+            proj_dim        = 64,
+            max_map_steps   = steps,
+        )
+
     return configs
 
 

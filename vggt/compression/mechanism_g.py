@@ -51,12 +51,25 @@ class DPPConfig:
     protect_special: bool = True
     """始终保留所有特殊 token（register + camera），不参与剪枝"""
 
-    selection_mode: Literal["dpp", "random"] = "dpp"
-    """Token 选择策略：'dpp' 使用 DPP Greedy MAP 推断；'random' 使用均匀随机采样（对照实验）"""
+    selection_mode: Literal["dpp", "random", "topk_stable"] = "dpp"
+    """Token 选择策略：
+    - 'dpp'          : DPP Greedy MAP 推断（relevance × diversity）
+    - 'random'       : 均匀随机采样（对照实验，验证 gather-attend-scatter 本身的影响）
+    - 'topk_stable'  : 仅按 relevance 分数排序取 Top-M（无 diversity 约束），
+                       用于隔离「稳定性选择」与「帧内多样性选择」两个效果"""
 
     proj_dim: int = 64
     """相似度 / 相关性计算所使用的嵌入维度（取 feature 前 proj_dim 维）；
     0 表示使用全部 C 维（精确但慢）；默认 64 以大幅降低计算开销"""
+
+    max_map_steps: int = 128
+    """Greedy MAP 推断的最大迭代步数，超出部分用均匀随机采样补全。
+
+    Greedy MAP 每步约产生 1 ms Python→GPU kernel launch 延迟，
+    总开销 ≈ 1 ms × M × num_blocks（线性于 M，与 FLOPs 无关）。
+    限制为 128 步可将所有 keep_ratio 配置的 DPP 开销均匀控制在 ~1.5 s，
+    同时由 DPP 保证前 128 个最重要 anchor token 的多样性，
+    其余 slot 由随机采样填充。0 = 不限制（完整 Greedy MAP）"""
 
     def __post_init__(self):
         assert 0.0 < self.keep_ratio <= 1.0, "keep_ratio 必须在 (0, 1]"
@@ -65,6 +78,7 @@ class DPPConfig:
         )
         assert self.num_adj_frames == -1 or self.num_adj_frames >= 1
         assert self.proj_dim >= 0, "proj_dim 必须为非负整数（0 = 使用全部 C 维）"
+        assert self.max_map_steps >= 0, "max_map_steps 必须为非负整数（0 = 不限制）"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -107,6 +121,15 @@ class DPPTokenSelector:
             # 向量化均匀随机采样（每帧独立，无 Python for-loop）
             noise = torch.rand(S, N, device=patch_tokens.device)
             idx   = noise.argsort(dim=1)[:, :M]          # [S, M]  未排序
+            return torch.sort(idx, dim=1).values           # [S, M]  已排序
+
+        # ── Top-K Stable 路径（纯 relevance 排序，无 diversity）─────────────
+        # 用于隔离「稳定性选择」效果：排除 DPP diversity 项后，
+        # 仅保留跨帧相似度最高的 M 个 token。
+        if self.cfg.selection_mode == "topk_stable":
+            with torch.no_grad():
+                rel = self._compute_relevance(patch_tokens, patch_h, patch_w)  # [S, N]
+            _, idx = rel.topk(M, dim=1)                   # [S, M]  未排序
             return torch.sort(idx, dim=1).values           # [S, M]  已排序
 
         # ── DPP 路径 ────────────────────────────────────────────────────────
@@ -207,15 +230,21 @@ class DPPTokenSelector:
             pairwise = pairwise.masked_fill(~keep.unsqueeze(-1), float("-inf"))
 
         # ── Step 5：跨帧聚合 ─────────────────────────────────────────────────
+        # relevance 衡量 token 对 Global Attention 的「可用性」。
+        # Global Attention 目标是跨帧空间对应（cross-frame correspondence），
+        # 因此跨帧相似度高（稳定、可匹配）的 token 应有更高 relevance。
+        # 公式：q_i = (1 + max_sim) / 2 ∈ [0, 1]
+        #   max_sim → +1（高度相似，稳定特征） → q_i → 1（高优先保留）
+        #   max_sim → -1（完全不同，动态/遮挡）→ q_i → 0（低优先）
         if self.cfg.relevance_agg == "max":
-            max_sim = pairwise.max(dim=1).values          # [S, N]（-inf 被忽略）
-            relevance = 1.0 - max_sim.clamp(-1.0, 1.0)
+            max_sim   = pairwise.max(dim=1).values        # [S, N]（-inf 被忽略）
+            relevance = (1.0 + max_sim.clamp(-1.0, 1.0)) / 2.0
         else:
             valid_mask  = pairwise != float("-inf")        # [S, S, N]
             count       = valid_mask.float().sum(dim=1).clamp(min=1.0)  # [S, N]
             pairwise_s  = pairwise.masked_fill(~valid_mask, 0.0)
             mean_sim    = pairwise_s.sum(dim=1) / count    # [S, N]
-            relevance   = 1.0 - mean_sim.clamp(-1.0, 1.0)
+            relevance   = (1.0 + mean_sim.clamp(-1.0, 1.0)) / 2.0
 
         return relevance.to(dtype)  # [S, N]
 
@@ -259,17 +288,25 @@ class DPPTokenSelector:
         dtype   = kernel.dtype
         s_range = torch.arange(S, device=dev)
 
+        # 确定实际执行的 Greedy MAP 步数
+        # max_map_steps=0 表示不限制；否则上限为 min(M, max_map_steps)
+        max_steps    = self.cfg.max_map_steps
+        actual_steps = M if max_steps <= 0 else min(M, max_steps)
+
         # cis[t, s, n]：第 t 步第 s 帧的 Cholesky 列向量 e_t[n]
-        cis  = torch.zeros(M, S, N, device=dev, dtype=dtype)
+        cis  = torch.zeros(actual_steps, S, N, device=dev, dtype=dtype)
         # di2s[s, n]：det 增量的分母（剩余"平方长度"）；初始为对角元素
         di2s = kernel.diagonal(dim1=1, dim2=2).clone()     # [S, N]
 
-        select_idx = torch.empty(M, S, dtype=torch.long, device=dev)
+        select_idx    = torch.empty(M, S, dtype=torch.long, device=dev)
+        # 标记已选 token，供随机补全时排除
+        selected_mask = torch.zeros(S, N, dtype=torch.bool, device=dev)
 
-        for i in range(M):
+        for i in range(actual_steps):
             # 1. 选出每帧中 di2s 最大的 token（行列式增量最大化）
             j = di2s.argmax(dim=-1)        # [S]
             select_idx[i] = j
+            selected_mask[s_range, j] = True
 
             # 2. 提取 kernel 的第 j[s] 行：kernel[s, j[s], :] → [S, N]
             row_j = kernel[s_range, j]     # [S, N]
@@ -291,6 +328,15 @@ class DPPTokenSelector:
             di2s            -= eis.pow(2)
             # 已选 token 的 di2s 设为 -inf，避免重复选择
             di2s[s_range, j] = float("-inf")
+
+        # ── 随机补全（actual_steps < M 时激活）──────────────────────────────
+        # 从未被 Greedy MAP 选中的 token 中均匀随机采样，完全向量化。
+        if actual_steps < M:
+            fill_count = M - actual_steps
+            noise = torch.rand(S, N, device=dev)
+            noise.masked_fill_(selected_mask, -1.0)          # 已选位置赋极低分
+            _, fill_idx = noise.topk(fill_count, dim=1)      # [S, fill_count]
+            select_idx[actual_steps:] = fill_idx.t()         # [fill_count, S]
 
         # 对每帧选出的索引排序（保持位置稳定性，方便 scatter）
         select_idx = select_idx.t().contiguous()           # [S, M]
