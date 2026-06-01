@@ -755,18 +755,18 @@ def plot_per_layer_heatmap(results: dict, out_dir: Path) -> None:
             if not np.isnan(baseline_tum) and not np.isnan(v):
                 ate_delta_frame[i] = v - baseline_tum
 
-    # 检查是否有任何有效数据
+    # Check if any valid data exists
     has_global = not np.all(np.isnan(ate_delta_global))
     has_frame  = not np.all(np.isnan(ate_delta_frame))
 
     if not has_global and not has_frame:
-        print("  ⚠ 无逐层数据，跳过热力图")
+        print("  [WARN] No per-layer data, skipping heatmap")
         return
 
     fig, axes = plt.subplots(2, 1, figsize=(18, 5))
     layer_idx = np.arange(n_layers)
 
-    # 颜色范围：以最大绝对值为准，diverging colormap
+    # color range: diverging colormap symmetric around 0
     all_deltas = np.concatenate([
         ate_delta_global[~np.isnan(ate_delta_global)],
         ate_delta_frame[~np.isnan(ate_delta_frame)],
@@ -776,15 +776,15 @@ def plot_per_layer_heatmap(results: dict, out_dir: Path) -> None:
         return
     vmax = max(abs(all_deltas).max() * 1.1, 1e-6)
     norm = mcolors.TwoSlopeNorm(vmin=-vmax, vcenter=0.0, vmax=vmax)
-    cmap = plt.cm.RdYlGn_r   # 红=ATE上升（有害），绿=ATE下降（无害/有益）
+    cmap = plt.cm.RdYlGn_r   # red=ATE up (harmful), green=ATE down/stable
 
     for ax, deltas, ate_vals, title, color in [
-        (axes[0], ate_delta_global, ate_global, "Global Blocks 静默 ATE 变化量 (vs baseline)", "steelblue"),
-        (axes[1], ate_delta_frame,  ate_frame,  "Frame Blocks 静默 ATE 变化量 (vs baseline)",  "darkorange"),
+        (axes[0], ate_delta_global, ate_global, "Global Blocks Silencing: ATE Change (vs baseline)", "steelblue"),
+        (axes[1], ate_delta_frame,  ate_frame,  "Frame Blocks Silencing: ATE Change (vs baseline)",  "darkorange"),
     ]:
         valid = ~np.isnan(deltas)
         if not valid.any():
-            ax.text(0.5, 0.5, "无数据", transform=ax.transAxes,
+            ax.text(0.5, 0.5, "No data", transform=ax.transAxes,
                     ha="center", va="center", fontsize=12, color="gray")
             ax.set_title(title, fontsize=11)
             continue
@@ -792,26 +792,23 @@ def plot_per_layer_heatmap(results: dict, out_dir: Path) -> None:
         bars = ax.bar(layer_idx[valid], deltas[valid],
                       color=cmap(norm(deltas[valid])), edgecolor="white", linewidth=0.5)
 
-        # 在柱上标注绝对 ATE 值
         for xi, vi, di in zip(layer_idx[valid], ate_vals[valid], deltas[valid]):
             if not np.isnan(vi):
                 ax.text(xi, di + np.sign(di) * 0.0005,
                         f"{vi:.3f}", ha="center", va="bottom" if di >= 0 else "top",
                         fontsize=6.5, color="black")
 
-        # 标注用户观测层
-        for layer_range, label, linestyle in [
-            ([3, 4],         "观测稀疏 3–4",   "--"),
-            (list(range(10, 17)), "观测稀疏 10–16", ":"),
+        for layer_range, linestyle in [
+            ([3, 4],              "--"),
+            (list(range(10, 17)), ":"),
         ]:
             for li in layer_range:
                 ax.axvline(li, color="purple", linestyle=linestyle,
                            alpha=0.5, linewidth=1.0)
-        # 图例说明
         ax.axvline(3, color="purple", linestyle="--", alpha=0.5, linewidth=1.0,
-                   label="观测稀疏层 3–4")
+                   label="Observed sparse layers 3-4")
         ax.axvline(10, color="purple", linestyle=":", alpha=0.5, linewidth=1.0,
-                   label="观测稀疏层 10–16")
+                   label="Observed sparse layers 10-16")
 
         ax.axhline(0, color="black", linewidth=0.8)
         if not np.isnan(baseline_tum):
@@ -819,17 +816,16 @@ def plot_per_layer_heatmap(results: dict, out_dir: Path) -> None:
         else:
             ax.set_title(title, fontsize=11)
         ax.set_xlabel("Layer Index", fontsize=10)
-        ax.set_ylabel("ΔATE (m)", fontsize=10)
+        ax.set_ylabel("Delta ATE (m)", fontsize=10)
         ax.set_xticks(layer_idx)
         ax.tick_params(axis="x", labelsize=8)
         ax.legend(fontsize=8, loc="upper right")
 
-    # 颜色条
     sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
-    fig.colorbar(sm, ax=axes, label="ΔATE (m): 红=ATE升（有害），绿=ATE降/稳", shrink=0.6)
+    fig.colorbar(sm, ax=axes, label="Delta ATE (m): red=ATE up (harmful), green=ATE down/stable", shrink=0.6)
 
-    fig.suptitle("VGGT 层静默实验：相机位姿 ATE 变化量（TUM walking_xyz）",
+    fig.suptitle("VGGT Layer Silencing: Camera Pose ATE Change (TUM walking_xyz)",
                  fontsize=13, fontweight="bold")
     plt.tight_layout()
     path = out_dir / "heatmap_per_layer.png"
@@ -858,7 +854,7 @@ def plot_range_ablation(results: dict, out_dir: Path) -> None:
     range_keys = [k for k in range_keys if k in results]
 
     if not range_keys:
-        print("  ⚠ 无范围配置数据，跳过 range_ablation 图")
+        print("  [WARN] No range config data, skipping range_ablation plot")
         return
 
     ate_vals  = [_safe(results, k, "tum", "ate")  for k in range_keys]
@@ -869,8 +865,8 @@ def plot_range_ablation(results: dict, out_dir: Path) -> None:
     fig, axes = plt.subplots(1, 2, figsize=(16, 5))
 
     for ax, vals, ylabel, title in [
-        (axes[0], ate_vals,  "ATE (m)",   "TUM ATE — 范围静默对比"),
-        (axes[1], rpet_vals, "RPEt (m)",  "TUM RPEt — 范围静默对比"),
+        (axes[0], ate_vals,  "ATE (m)",   "TUM ATE - Range Silencing Comparison"),
+        (axes[1], rpet_vals, "RPEt (m)",  "TUM RPEt - Range Silencing Comparison"),
     ]:
         x   = np.arange(len(range_keys))
         clr = []
@@ -880,11 +876,11 @@ def plot_range_ablation(results: dict, out_dir: Path) -> None:
             elif np.isnan(v):
                 clr.append("lightgray")
             elif v <= baseline_ate * 1.05:
-                clr.append("seagreen")   # 与 baseline 相差 < 5%：安全
+                clr.append("seagreen")   # within 5% of baseline: safe
             elif v <= baseline_ate * 1.20:
-                clr.append("gold")       # 5–20%：中等影响
+                clr.append("gold")       # 5-20%: moderate impact
             else:
-                clr.append("tomato")     # > 20%：严重影响
+                clr.append("tomato")     # >20%: severe impact
 
         ax.bar(x, [v if not np.isnan(v) else 0 for v in vals],
                color=clr, edgecolor="white", linewidth=0.6)
@@ -893,7 +889,7 @@ def plot_range_ablation(results: dict, out_dir: Path) -> None:
             ax.axhline(baseline_ate, color="red", linestyle="--",
                        linewidth=1.0, label=f"baseline={baseline_ate:.4f} m")
             ax.axhline(baseline_ate * 1.05, color="gold", linestyle=":",
-                       linewidth=0.8, label="+5% 容忍阈值")
+                       linewidth=0.8, label="+5% tolerance threshold")
 
         ax.set_xticks(x)
         ax.set_xticklabels(range_keys, rotation=35, ha="right", fontsize=8)
@@ -901,7 +897,7 @@ def plot_range_ablation(results: dict, out_dir: Path) -> None:
         ax.set_title(title, fontsize=11)
         ax.legend(fontsize=8)
 
-    fig.suptitle("VGGT 范围静默实验 — 相机位姿影响（TUM walking_xyz）",
+    fig.suptitle("VGGT Range Silencing: Camera Pose Impact (TUM walking_xyz)",
                  fontsize=13, fontweight="bold")
     plt.tight_layout()
     path = out_dir / "range_ablation.png"
@@ -922,7 +918,7 @@ def plot_sensitivity_curve(results: dict, out_dir: Path) -> None:
     """
     baseline_ate = _safe(results, "baseline", "tum", "ate")
     if np.isnan(baseline_ate):
-        print("  ⚠ 无 baseline ATE，跳过敏感度曲线")
+        print("  [WARN] No baseline ATE, skipping sensitivity curve")
         return
 
     layers, deltas = [], []
@@ -935,7 +931,7 @@ def plot_sensitivity_curve(results: dict, out_dir: Path) -> None:
                 deltas.append(ate - baseline_ate)
 
     if not layers:
-        print("  ⚠ 无逐层全局块数据，跳过敏感度曲线")
+        print("  [WARN] No per-layer global block data, skipping sensitivity curve")
         return
 
     layers  = np.array(layers)
@@ -953,9 +949,9 @@ def plot_sensitivity_curve(results: dict, out_dir: Path) -> None:
         if li in observed_set:
             colors.append("purple")
         elif s_deltas[list(s_layers).index(li)] < 0.001:
-            colors.append("seagreen")
+            colors.append("seagreen")  # safe to silence
         else:
-            colors.append("tomato")
+            colors.append("tomato")   # sensitive layer
 
     bars = ax.bar(range(len(s_layers)), s_deltas, color=colors,
                   edgecolor="white", linewidth=0.5)
@@ -969,20 +965,20 @@ def plot_sensitivity_curve(results: dict, out_dir: Path) -> None:
 
     ax.axhline(0, color="black", linewidth=0.8)
     ax.axhline(0.001, color="gold", linestyle=":", linewidth=0.8,
-               label="+1mm 容忍线")
+               label="+1mm tolerance")
 
     from matplotlib.patches import Patch
     legend_elements = [
-        Patch(facecolor="purple",   label="用户观测稀疏层（3–4, 10–16）"),
-        Patch(facecolor="seagreen", label="安全静默层（ΔATE < 1mm）"),
-        Patch(facecolor="tomato",   label="敏感层（ΔATE ≥ 1mm）"),
+        Patch(facecolor="purple",   label="Observed sparse layers (3-4, 10-16)"),
+        Patch(facecolor="seagreen", label="Safe to silence (Delta ATE < 1mm)"),
+        Patch(facecolor="tomato",   label="Sensitive layer (Delta ATE >= 1mm)"),
     ]
     ax.legend(handles=legend_elements, fontsize=9)
-    ax.set_xlabel("层排序（按 ΔATE 升序）", fontsize=10)
-    ax.set_ylabel("ΔATE (m)", fontsize=10)
+    ax.set_xlabel("Layer rank (sorted by Delta ATE ascending)", fontsize=10)
+    ax.set_ylabel("Delta ATE (m)", fontsize=10)
     ax.set_title(
-        f"Global Blocks 逐层敏感度曲线（TUM，baseline={baseline_ate:.4f} m）\n"
-        "数字 = 层索引，紫色 = 用户观测稀疏层",
+        f"Global Blocks Sensitivity Curve (TUM, baseline={baseline_ate:.4f} m)\n"
+        "Number = layer index, purple = observed sparse layers",
         fontsize=11,
     )
     plt.tight_layout()
@@ -993,16 +989,16 @@ def plot_sensitivity_curve(results: dict, out_dir: Path) -> None:
 
 
 def print_summary_table(results: dict) -> None:
-    """打印主要结论：哪些配置与 baseline 相差 < 5%（可能可以静默）。"""
+    """Print summary table: which configs are within 5% of baseline (potentially safe to silence)."""
     baseline_ate = _safe(results, "baseline", "tum", "ate")
     if np.isnan(baseline_ate):
         return
 
     print(f"\n{'='*70}")
-    print(f"  结论汇总  (baseline TUM ATE = {baseline_ate:.4f} m)")
+    print(f"  Summary  (baseline TUM ATE = {baseline_ate:.4f} m)")
     print(f"{'='*70}")
-    print(f"  {'配置':<35} {'TUM ATE':>9} {'ΔATE':>9} {'影响程度':>10}")
-    print(f"  {'─'*35} {'─'*9} {'─'*9} {'─'*10}")
+    print(f"  {'Config':<35} {'TUM ATE':>9} {'dATE':>9} {'Impact':>10}")
+    print(f"  {'-'*35} {'-'*9} {'-'*9} {'-'*10}")
 
     for cfg_name, res in results.items():
         ate = _safe(results, cfg_name, "tum", "ate")
@@ -1010,21 +1006,20 @@ def print_summary_table(results: dict) -> None:
             continue
         delta = ate - baseline_ate
         if abs(delta) < 0.001:
-            impact = "✓ 可静默"
+            impact = "[OK] safe"
         elif abs(delta) < baseline_ate * 0.05:
-            impact = "~ 轻微"
+            impact = "[~] minor"
         elif abs(delta) < baseline_ate * 0.20:
-            impact = "⚠ 中等"
+            impact = "[!] moderate"
         else:
-            impact = "✗ 显著"
+            impact = "[X] severe"
         label = res.get("label", cfg_name)[:34]
-        print(f"  {cfg_name:<20} {label:<14} {ate:>9.4f} {delta:>+9.4f} {impact:>10}")
+        print(f"  {cfg_name:<20} {label:<14} {ate:>9.4f} {delta:>+9.4f} {impact:>12}")
 
     print()
 
-    # 特别汇报用户关注的范围
-    print(f"  {'─'*70}")
-    print("  用户观测稀疏层（3–4, 10–16）静默结果：")
+    print(f"  {'-'*70}")
+    print("  Observed sparse layers (3-4, 10-16) silencing results:")
     for key in ["range_global_3_4", "range_frame_3_4", "range_both_3_4",
                 "range_global_10_16", "range_frame_10_16", "range_both_10_16",
                 "range_both_3_4_10_16"]:
@@ -1033,7 +1028,7 @@ def print_summary_table(results: dict) -> None:
             continue
         delta = ate - baseline_ate
         pct   = delta / baseline_ate * 100
-        print(f"    {key:<32} ATE={ate:.4f} m  Δ={delta:+.4f} m ({pct:+.1f}%)")
+        print(f"    {key:<32} ATE={ate:.4f} m  d={delta:+.4f} m ({pct:+.1f}%)")
 
 
 def save_all_plots(results: dict, out_dir: Path) -> None:
