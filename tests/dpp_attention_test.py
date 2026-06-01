@@ -306,6 +306,30 @@ def build_dpp_configs() -> Dict[str, Optional["DPPConfig"]]:
             max_map_steps   = steps,
         )
 
+    # ── G_div_kr*：纯帧内多样性 DPP（无 relevance，完整 MAP）────────────────
+    # selection_mode="dpp_diversity"：令 q_i=1，L-ensemble kernel = 帧内余弦相似度矩阵。
+    # 选择完全由「帧内 token 互斥性」驱动，不涉及任何跨帧信号，
+    # 是对 DPP diversity 项本身贡献的纯粹实验。
+    # max_map_steps=0：完整 MAP（_greedy_map 内部已升级至 float32 以修复数值不稳定）。
+    # 与 R_kr* 对比：验证「帧内多样性选择 vs 随机采样」。
+    for kr, name in [
+        (0.90, "G_div_kr90"),
+        (0.70, "G_div_kr70"),
+        (0.50, "G_div_kr50"),
+        (0.30, "G_div_kr30"),
+        (0.10, "G_div_kr10"),
+    ]:
+        configs[name] = DPPConfig(
+            keep_ratio      = kr,
+            window_size     = 3,   # window_size 对 dpp_diversity 无效（不计算 relevance）
+            num_adj_frames  = -1,
+            relevance_agg   = "max",
+            on_all_layers   = True,
+            selection_mode  = "dpp_diversity",
+            proj_dim        = 64,
+            max_map_steps   = 0,   # 完整 MAP（float32 Cholesky，数值稳定）
+        )
+
     return configs
 
 

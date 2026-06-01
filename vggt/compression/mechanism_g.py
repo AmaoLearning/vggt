@@ -51,12 +51,15 @@ class DPPConfig:
     protect_special: bool = True
     """始终保留所有特殊 token（register + camera），不参与剪枝"""
 
-    selection_mode: Literal["dpp", "random", "topk_stable"] = "dpp"
+    selection_mode: Literal["dpp", "random", "topk_stable", "dpp_diversity"] = "dpp"
     """Token 选择策略：
-    - 'dpp'          : DPP Greedy MAP 推断（relevance × diversity）
-    - 'random'       : 均匀随机采样（对照实验，验证 gather-attend-scatter 本身的影响）
-    - 'topk_stable'  : 仅按 relevance 分数排序取 Top-M（无 diversity 约束），
-                       用于隔离「稳定性选择」与「帧内多样性选择」两个效果"""
+    - 'dpp'           : DPP Greedy MAP 推断（relevance × diversity）
+    - 'random'        : 均匀随机采样（对照实验，验证 gather-attend-scatter 本身的影响）
+    - 'topk_stable'   : 仅按 relevance 分数排序取 Top-M（无 diversity 约束），
+                        用于隔离「稳定性选择」与「帧内多样性选择」两个效果
+    - 'dpp_diversity' : 纯帧内多样性 DPP（令 q_i=1，即 L[i,j]=sim[i,j]），
+                        不依赖任何跨帧信号，完全由帧内余弦相似度驱动；
+                        与 'random' 对比可独立验证 DPP diversity 项的贡献"""
 
     proj_dim: int = 64
     """相似度 / 相关性计算所使用的嵌入维度（取 feature 前 proj_dim 维）；
@@ -131,6 +134,20 @@ class DPPTokenSelector:
                 rel = self._compute_relevance(patch_tokens, patch_h, patch_w)  # [S, N]
             _, idx = rel.topk(M, dim=1)                   # [S, M]  未排序
             return torch.sort(idx, dim=1).values           # [S, M]  已排序
+
+        # ── 纯帧内多样性 DPP 路径（q_i=1，无 relevance）─────────────────────
+        # 令所有 relevance = 1，L-ensemble kernel 退化为帧内余弦相似度矩阵：
+        #   L[i,j] = 1 * sim[i,j] * 1 = sim[i,j]
+        # 选择完全由帧内 token 间的「互斥性」（越不相似越倾向同时被选）驱动，
+        # 不依赖任何跨帧信号。与 random 对比可独立量化 DPP diversity 项的价值。
+        if self.cfg.selection_mode == "dpp_diversity":
+            with torch.no_grad():
+                sim    = self._compute_similarity(patch_tokens)                # [S, N, N]
+                rel    = torch.ones(S, N, device=patch_tokens.device,
+                                    dtype=patch_tokens.dtype)                  # q_i = 1
+                kernel = self._build_kernel(sim, rel)                          # [S, N, N]
+                idx    = self._greedy_map(kernel, M)                           # [S, M]
+            return idx
 
         # ── DPP 路径 ────────────────────────────────────────────────────────
         with torch.no_grad():
@@ -293,10 +310,13 @@ class DPPTokenSelector:
         max_steps    = self.cfg.max_map_steps
         actual_steps = M if max_steps <= 0 else min(M, max_steps)
 
+        # Cholesky 更新状态强制使用 float32，避免 BFloat16（7位尾数）的累积舍入误差：
+        # 实测在 BFloat16 下 ~130–150 步后 di2s 产生显著漂移（见 §10.7.4），
+        # 导致 argmax 退化为随机甚至反向选择。float32 的 23 位尾数可稳定运行到 M=1369。
         # cis[t, s, n]：第 t 步第 s 帧的 Cholesky 列向量 e_t[n]
-        cis  = torch.zeros(actual_steps, S, N, device=dev, dtype=dtype)
+        cis  = torch.zeros(actual_steps, S, N, device=dev, dtype=torch.float32)
         # di2s[s, n]：det 增量的分母（剩余"平方长度"）；初始为对角元素
-        di2s = kernel.diagonal(dim1=1, dim2=2).clone()     # [S, N]
+        di2s = kernel.diagonal(dim1=1, dim2=2).clone().float()  # float32
 
         select_idx    = torch.empty(M, S, dtype=torch.long, device=dev)
         # 标记已选 token，供随机补全时排除
@@ -308,8 +328,8 @@ class DPPTokenSelector:
             select_idx[i] = j
             selected_mask[s_range, j] = True
 
-            # 2. 提取 kernel 的第 j[s] 行：kernel[s, j[s], :] → [S, N]
-            row_j = kernel[s_range, j]     # [S, N]
+            # 2. 提取 kernel 的第 j[s] 行并升至 float32
+            row_j = kernel[s_range, j].float()  # [S, N]
 
             # 3. Cholesky 秩一更新
             if i > 0:
