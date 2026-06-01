@@ -193,6 +193,26 @@ def build_dpp_configs() -> Dict[str, Optional["DPPConfig"]]:
         on_all_layers  = False,
     )
 
+    # ── 随机采样对照组（§10 验证 gather-attend-scatter 模式本身的影响） ────────
+    # 与 G_kr* 完全相同的 keep_ratio，但用均匀随机采样代替 DPP MAP 推断，
+    # 区分"token 选择质量"与"gather-attend-scatter 模式退化"两种效应。
+    for kr, name in [
+        (0.90, "R_kr90"),
+        (0.70, "R_kr70"),
+        (0.50, "R_kr50"),
+        (0.30, "R_kr30"),
+        (0.10, "R_kr10"),
+    ]:
+        configs[name] = DPPConfig(
+            keep_ratio      = kr,
+            window_size     = 3,
+            num_adj_frames  = -1,
+            relevance_agg   = "max",
+            on_all_layers   = True,
+            selection_mode  = "random",
+            proj_dim        = 64,
+        )
+
     return configs
 
 
@@ -964,41 +984,55 @@ def plot_metric_comparison(results: dict, task: str, metrics: List[str],
 
 def plot_pareto_curve(results: dict, out_dir: Path) -> None:
     """
-    绘制 keep_ratio 变体（G_kr*）的 Pareto 曲线：
+    绘制 keep_ratio 变体的 Pareto 曲线，同时展示 DPP（G_kr*）与随机采样（R_kr*）：
         X 轴：推理时间（秒）
         Y 轴：精度指标（7-Scenes Acc_mean / Sintel AbsRel）
-    越靠左下方越好。
+    越靠左下方越好；DPP 点应在随机采样点左下方才证明 DPP 优于随机。
     """
-    kr_cfgs = [k for k in results if k.startswith("G_kr") or k == "baseline"]
+    dpp_cfgs  = [k for k in results if k.startswith("G_kr") or k == "baseline"]
+    rand_cfgs = [k for k in results if k.startswith("R_kr")]
 
     for task, metric, lower_is_better, fname in [
         ("7scenes", "acc_mean",  True,  "dpp_pareto_7scenes.png"),
         ("sintel",  "abs_rel",   True,  "dpp_pareto_sintel.png"),
     ]:
-        xs = [_safe_get(results, c, task, "time_s") for c in kr_cfgs]
-        ys = [_safe_get(results, c, task, metric)   for c in kr_cfgs]
-        valid = [(x, y, c) for x, y, c in zip(xs, ys, kr_cfgs)
-                 if not (np.isnan(x) or np.isnan(y))]
-        if len(valid) < 2:
+        fig, ax = plt.subplots(figsize=(8, 5))
+        plotted = False
+
+        for cfgs, label, marker, color in [
+            (dpp_cfgs,  "DPP (G_kr*)",    "o", "steelblue"),
+            (rand_cfgs, "Random (R_kr*)", "s", "tomato"),
+        ]:
+            xs = [_safe_get(results, c, task, "time_s") for c in cfgs]
+            ys = [_safe_get(results, c, task, metric)   for c in cfgs]
+            valid = [(x, y, c) for x, y, c in zip(xs, ys, cfgs)
+                     if not (np.isnan(x) or np.isnan(y))]
+            if len(valid) < 1:
+                continue
+            x_v, y_v, lbls = zip(*valid)
+            ax.scatter(x_v, y_v, s=80, label=label, marker=marker, color=color, zorder=3)
+            for x, y, lbl in zip(x_v, y_v, lbls):
+                ax.annotate(lbl, (x, y), textcoords="offset points",
+                            xytext=(5, 5), fontsize=7)
+            ax.plot(sorted(x_v), [y for _, y in sorted(zip(x_v, y_v))],
+                    linestyle="--", linewidth=0.8, alpha=0.5, color=color)
+            plotted = True
+
+        if not plotted:
+            plt.close()
             continue
 
-        x_v, y_v, labels = zip(*valid)
-        fig, ax = plt.subplots(figsize=(7, 5))
-        ax.scatter(x_v, y_v, s=80, zorder=3)
-        for x, y, lbl in zip(x_v, y_v, labels):
-            ax.annotate(lbl, (x, y), textcoords="offset points",
-                        xytext=(5, 5), fontsize=8)
-        ax.plot(x_v, y_v, linestyle="--", linewidth=0.8, alpha=0.5)
         ax.set_xlabel("Inference Time (s)")
-        ylabel = f"{metric} (↓ lower=better)" if lower_is_better else f"{metric} (↑ higher=better)"
+        ylabel = f"{metric} (\u2193 lower=better)" if lower_is_better else f"{metric} (\u2191 higher=better)"
         ax.set_ylabel(ylabel)
-        ax.set_title(f"DPP keep_ratio Pareto — {task}")
+        ax.set_title(f"DPP vs Random Pareto \u2014 {task}")
+        ax.legend()
         ax.grid(True, alpha=0.3)
         plt.tight_layout()
         out_path = out_dir / fname
         plt.savefig(out_path, dpi=150)
         plt.close()
-        print(f"  ✓ Pareto 曲线：{out_path}")
+        print(f"  \u2713 Pareto \u66f2\u7ebf\uff1a{out_path}")
 
 
 # ── DPP 专有图 2：on_all_layers vs cache 模式对比 ─────────────────────────────

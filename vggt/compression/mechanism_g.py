@@ -51,12 +51,20 @@ class DPPConfig:
     protect_special: bool = True
     """始终保留所有特殊 token（register + camera），不参与剪枝"""
 
+    selection_mode: Literal["dpp", "random"] = "dpp"
+    """Token 选择策略：'dpp' 使用 DPP Greedy MAP 推断；'random' 使用均匀随机采样（对照实验）"""
+
+    proj_dim: int = 64
+    """相似度 / 相关性计算所使用的嵌入维度（取 feature 前 proj_dim 维）；
+    0 表示使用全部 C 维（精确但慢）；默认 64 以大幅降低计算开销"""
+
     def __post_init__(self):
         assert 0.0 < self.keep_ratio <= 1.0, "keep_ratio 必须在 (0, 1]"
         assert self.window_size >= 1 and self.window_size % 2 == 1, (
             "window_size 必须为正奇数"
         )
         assert self.num_adj_frames == -1 or self.num_adj_frames >= 1
+        assert self.proj_dim >= 0, "proj_dim 必须为非负整数（0 = 使用全部 C 维）"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -94,6 +102,14 @@ class DPPTokenSelector:
             # keep_ratio == 1.0：直接返回全部索引
             return torch.arange(N, device=patch_tokens.device).unsqueeze(0).expand(S, -1)
 
+        # ── 随机采样路径（对照实验） ──────────────────────────────────────────
+        if self.cfg.selection_mode == "random":
+            # 向量化均匀随机采样（每帧独立，无 Python for-loop）
+            noise = torch.rand(S, N, device=patch_tokens.device)
+            idx   = noise.argsort(dim=1)[:, :M]          # [S, M]  未排序
+            return torch.sort(idx, dim=1).values           # [S, M]  已排序
+
+        # ── DPP 路径 ────────────────────────────────────────────────────────
         with torch.no_grad():
             sim    = self._compute_similarity(patch_tokens)                    # [S, N, N]
             rel    = self._compute_relevance(patch_tokens, patch_h, patch_w)   # [S, N]
@@ -110,9 +126,11 @@ class DPPTokenSelector:
         self,
         patch_tokens: torch.Tensor,  # [S, N, C]
     ) -> torch.Tensor:               # [S, N, N]
-        """帧内 Gram 矩阵，元素为单位化 token 对之间的点积（余弦相似度）。"""
-        v_hat = F.normalize(patch_tokens, dim=-1)              # [S, N, C]
-        sim   = torch.bmm(v_hat, v_hat.transpose(1, 2))        # [S, N, N]
+        """帧内 Gram 矩阵（余弦相似度）。若 proj_dim>0，先截取前 proj_dim 维降低计算量。"""
+        C     = patch_tokens.shape[-1]
+        C_eff = self.cfg.proj_dim if 0 < self.cfg.proj_dim < C else C
+        v_hat = F.normalize(patch_tokens[..., :C_eff], dim=-1)  # [S, N, C_eff]
+        sim   = torch.bmm(v_hat, v_hat.transpose(1, 2))          # [S, N, N]
         return sim
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -126,68 +144,80 @@ class DPPTokenSelector:
         patch_w: int,
     ) -> torch.Tensor:               # [S, N]  值域 [0, 2]，越大越值得保留
         """
-        对每帧每个 patch token 计算跨帧独特性得分。
-        若 token 与参考帧同位置邻域高度相似（可由其他帧代替），得分低；
-        若跨帧变化显著（携带独特信息），得分高。
+        对每帧每个 patch token 计算跨帧独特性得分（向量化实现）。
 
-        实现：
-            1. 将 patch token 重排为 feature map [S, C, H, W]
-            2. F.unfold 一次性提取所有位置的 L×L 邻域
-            3. 对参考帧集合计算点积（余弦相似度的近似）
-            4. q_i = 1 - agg(cos)，agg 为 max 或 mean
+        核心优化：用 einsum("snc,tnc->stn") 一次性计算所有帧对的位置相似度 [S,S,N]，
+        取代原先 Python for-loop + 大 ref_unfolded 分配（[K,N,L²,C] 逐帧分配导致
+        巨量 GPU 内存往返）。通过 max_pool2d 在空间维度上实现 L×L 窗口聚合。
+
+        proj_dim 只影响 C_eff 维度大小，不改变输出语义：
+          C_eff = proj_dim（若 0 < proj_dim < C）或 C（全量）
+
+        算法步骤：
+            1. 取前 C_eff 维并单位化：v [S, N, C_eff]
+            2. pairwise[s, t, n] = v[s,n] · v[t,n]，形状 [S, S, N]
+            3. 若 L>1：对 pairwise 做 max_pool2d(kernel=L) 在空间维度扩展窗口
+            4. 屏蔽自帧（s==t）和非相邻帧（超出 k_adj 范围）
+            5. 对有效参考帧聚合（max 或 mean），得到每帧每 token 的跨帧最大相似度
+            6. relevance = 1 - max_sim（越不相似 = 越独特 = 得分越高）
         """
         S, N, C = patch_tokens.shape
         L    = self.cfg.window_size
         half = L // 2
         dev  = patch_tokens.device
+        dtype = patch_tokens.dtype
+
+        if S <= 1:
+            # 单帧无参考，所有 token 均视为独特
+            return torch.ones(S, N, device=dev, dtype=dtype)
 
         # 确定参考帧数
         k_adj = self.cfg.num_adj_frames if self.cfg.num_adj_frames > 0 else (S - 1)
         k_adj = min(k_adj, S - 1)
 
-        # 单位化并重排为特征图 [S, C, H, W]
-        v_hat    = F.normalize(patch_tokens, dim=-1)              # [S, N, C]
-        feat_map = v_hat.view(S, patch_h, patch_w, C)
-        feat_map = feat_map.permute(0, 3, 1, 2).contiguous()     # [S, C, H, W]
+        # ── Step 1：低维投影 + 单位化 ────────────────────────────────────────
+        C_eff = self.cfg.proj_dim if 0 < self.cfg.proj_dim < C else C
+        v = F.normalize(patch_tokens[..., :C_eff], dim=-1)  # [S, N, C_eff]
 
-        # 展开 L×L 邻域：[S, C*L*L, N]
-        # 边界用 0 填充；补零位置的点积为 0（偏保守估计，可接受）
-        unfolded = F.unfold(feat_map, kernel_size=L, padding=half)  # [S, C*L*L, N]
-        unfolded = unfolded.permute(0, 2, 1)                         # [S, N, C*L*L]
-        unfolded = unfolded.view(S, N, L * L, C)                     # [S, N, L*L, C]
+        # ── Step 2：向量化全帧对逐位置点积 ──────────────────────────────────
+        # pairwise[s, t, n] = v[s,n] · v[t,n]，O(S²·N·C_eff)
+        pairwise = torch.einsum("snc,tnc->stn", v, v)  # [S, S, N]
 
-        relevance = torch.zeros(S, N, device=dev, dtype=patch_tokens.dtype)
+        # ── Step 3：空间窗口扩展（max-pooling 代替 F.unfold） ───────────────
+        # 对 pairwise 中第 t 帧在位置 n 处的值，扩展到 n 周围 L×L 邻域的最大值，
+        # 等效于：对参考帧 t 的 feature map 先做 max_pool 再与 query 帧比较。
+        if L > 1:
+            p      = pairwise.reshape(S * S, 1, patch_h, patch_w)
+            p_win  = F.max_pool2d(p, kernel_size=L, stride=1, padding=half)
+            pairwise = p_win.reshape(S, S, N)
 
-        for s in range(S):
-            # 按帧索引距离升序选取 k_adj 个参考帧
-            others     = [s_ for s_ in range(S) if s_ != s]
-            ref_frames = sorted(others, key=lambda s_: abs(s_ - s))[:k_adj]
+        # ── Step 4：屏蔽无效帧 ───────────────────────────────────────────────
+        # 4a. 自帧（s==t）置 -inf
+        eye = torch.eye(S, device=dev, dtype=torch.bool)          # [S, S]
+        pairwise = pairwise.masked_fill(eye.unsqueeze(-1), float("-inf"))
 
-            if not ref_frames:
-                # 仅一帧时无跨帧参考，视全部 token 为独特
-                relevance[s] = 1.0
-                continue
+        # 4b. 仅保留距离最近的 k_adj 帧
+        if k_adj < S - 1:
+            s_idx = torch.arange(S, device=dev)
+            dist  = (s_idx.unsqueeze(0) - s_idx.unsqueeze(1)).abs()  # [S, S]
+            dist.fill_diagonal_(S + 1)                               # 自帧距离设大
+            _, top_k = dist.topk(k_adj, dim=1, largest=False)        # [S, k_adj]
+            keep = torch.zeros(S, S, device=dev, dtype=torch.bool)
+            keep.scatter_(1, top_k, True)
+            pairwise = pairwise.masked_fill(~keep.unsqueeze(-1), float("-inf"))
 
-            # ref_unfolded: [K, N, L*L, C]
-            ref_unfolded = unfolded[ref_frames]         # [K, N, L*L, C]
+        # ── Step 5：跨帧聚合 ─────────────────────────────────────────────────
+        if self.cfg.relevance_agg == "max":
+            max_sim = pairwise.max(dim=1).values          # [S, N]（-inf 被忽略）
+            relevance = 1.0 - max_sim.clamp(-1.0, 1.0)
+        else:
+            valid_mask  = pairwise != float("-inf")        # [S, S, N]
+            count       = valid_mask.float().sum(dim=1).clamp(min=1.0)  # [S, N]
+            pairwise_s  = pairwise.masked_fill(~valid_mask, 0.0)
+            mean_sim    = pairwise_s.sum(dim=1) / count    # [S, N]
+            relevance   = 1.0 - mean_sim.clamp(-1.0, 1.0)
 
-            # 查询向量 v_hat[s]: [N, C] → [1, N, 1, C]
-            query = v_hat[s].unsqueeze(0).unsqueeze(2)  # [1, N, 1, C]
-
-            # 点积 → 近似余弦相似度（因为 v_hat 已归一化，但 unfolded 中补零位置模长为 0）
-            # [K, N, L*L]
-            cos = (query * ref_unfolded).sum(dim=-1)
-
-            if self.cfg.relevance_agg == "max":
-                # 取 K 帧 × L*L 邻域中最大相似度
-                max_cos = cos.reshape(-1, N).max(dim=0).values   # [N]
-                relevance[s] = 1.0 - max_cos.clamp(-1.0, 1.0)
-            else:
-                # 取均值（包含补零位置的 0，会轻微低估均值）
-                mean_cos = cos.mean(dim=(0, 2))                  # [N]
-                relevance[s] = 1.0 - mean_cos.clamp(-1.0, 1.0)
-
-        return relevance  # [S, N]
+        return relevance.to(dtype)  # [S, N]
 
     # ──────────────────────────────────────────────────────────────────────────
     # Step 3：L-ensemble Kernel
