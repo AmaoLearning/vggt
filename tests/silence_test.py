@@ -478,21 +478,46 @@ def _parse_sintel_cam(cam_file: Path) -> np.ndarray:
     """
     Parse a Sintel .cam file and return the camera-to-world (c2w) 4x4 matrix.
 
-    The .cam format contains two flattened 3x3 / 3x4 matrices:
-      values 0-8   : intrinsic K (3x3, row-major)
-      values 9-20  : extrinsic [R|t] (3x4, row-major, world-to-camera)
+    Official MPI Sintel .cam files are binary:
+      float32 tag   = 202021.25
+      float64[9]    = intrinsic K  (3x3, row-major)
+      float64[12]   = extrinsic [R|t] (3x4, row-major, world-to-camera)
+
+    For robustness, this loader also accepts a plain-text fallback layout with
+    either 21 values (K + [R|t]) or 12 values ([R|t] only).
     """
-    vals = []
-    for line in cam_file.read_text().splitlines():
-        line = line.strip()
-        if line:
-            vals.extend(map(float, line.split()))
-    if len(vals) < 21:
-        raise ValueError(f"Unexpected .cam file (only {len(vals)} values): {cam_file}")
-    E = np.array(vals[9:21], dtype=np.float64).reshape(3, 4)
+    with open(cam_file, "rb") as f:
+        head = f.read(4)
+        if len(head) == 4:
+            magic = struct.unpack("<f", head)[0]
+            if abs(magic - 202021.25) < 1.0:
+                intri = np.frombuffer(f.read(9 * 8), dtype="<f8").copy()
+                extri = np.frombuffer(f.read(12 * 8), dtype="<f8").copy()
+                if intri.size != 9 or extri.size != 12:
+                    raise ValueError(f"Truncated binary .cam file: {cam_file}")
+                E = extri.reshape(3, 4)
+            else:
+                E = None
+        else:
+            E = None
+
+    if E is None:
+        vals = []
+        for line in cam_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+            line = line.strip()
+            if line:
+                vals.extend(map(float, line.split()))
+
+        if len(vals) >= 21:
+            E = np.array(vals[9:21], dtype=np.float64).reshape(3, 4)
+        elif len(vals) == 12:
+            E = np.array(vals, dtype=np.float64).reshape(3, 4)
+        else:
+            raise ValueError(f"Unexpected .cam file layout ({len(vals)} values): {cam_file}")
+
     w2c = np.eye(4, dtype=np.float64)
     w2c[:3, :] = E
-    return np.linalg.inv(w2c)   # c2w
+    return np.linalg.inv(w2c)
 
 
 def load_sintel_poses(data_dir: Path, max_frames: int,
@@ -816,6 +841,22 @@ def run_all_evaluations(args) -> dict:
                 except Exception as e:
                     print(f"✗ {e}")
                     cfg_results["7scenes"] = {"error": str(e)}
+
+            # ── Sintel（辅助：multi-scene pose）──────────────────────────────
+            if datasets.get("sintel") is not None:
+                print("  Sintel poses    …", end=" ", flush=True)
+                try:
+                    metrics, elapsed = evaluate_sintel_pose(
+                        model, datasets["sintel"], dtype, device, warmup
+                    )
+                    cfg_results["sintel"] = {**metrics, "time_s": elapsed}
+                    print(f"ATE={metrics['ate']:.4f} m  "
+                          f"RPEt={metrics['rpet']:.4f} m  "
+                          f"RPEr={metrics['rper']:.2f} deg  "
+                          f"t={elapsed:.2f}s")
+                except Exception as e:
+                    print(f"✗ {e}")
+                    cfg_results["sintel"] = {"error": str(e)}
 
         results[cfg_name] = cfg_results
 
