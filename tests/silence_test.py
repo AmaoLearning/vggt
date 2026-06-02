@@ -217,6 +217,40 @@ def build_silence_configs(groups: Optional[List[str]] = None) -> Dict[str, Silen
             label="帧+全局块 3–4 + 10–16 合并静默",
         )
 
+        # 层 4–8：per-layer 实验显示静默后 ATE 均有不同程度改善（位姿干扰假设）
+        configs["range_global_4_8"] = SilenceConfig(
+            global_layers=list(range(4, 9)),
+            label="global 4-8 silence (improvement hypothesis)",
+        )
+        configs["range_frame_4_8"] = SilenceConfig(
+            frame_layers=list(range(4, 9)),
+            label="frame 4-8 silence",
+        )
+        configs["range_both_4_8"] = SilenceConfig(
+            frame_layers=list(range(4, 9)), global_layers=list(range(4, 9)),
+            label="frame+global 4-8 silence",
+        )
+
+        # 层 20–23：per-layer 实验显示静默后 ATE 均有轻微改善
+        configs["range_global_20_23"] = SilenceConfig(
+            global_layers=list(range(20, 24)),
+            label="global 20-23 silence (improvement hypothesis)",
+        )
+        configs["range_frame_20_23"] = SilenceConfig(
+            frame_layers=list(range(20, 24)),
+            label="frame 20-23 silence",
+        )
+        configs["range_both_20_23"] = SilenceConfig(
+            frame_layers=list(range(20, 24)), global_layers=list(range(20, 24)),
+            label="frame+global 20-23 silence",
+        )
+
+        # 联合：4–8 + 20–23（跳过关键层 11–15）
+        configs["range_global_4_8_20_23"] = SilenceConfig(
+            global_layers=list(range(4, 9)) + list(range(20, 24)),
+            label="global 4-8 + 20-23 silence (skip critical 11-15)",
+        )
+
     # ── boundary：边界对照 ────────────────────────────────────────────────────
     if "boundary" in active:
         configs["all_global"] = SilenceConfig(
@@ -839,19 +873,17 @@ def plot_range_ablation(results: dict, out_dir: Path) -> None:
     范围静默和边界对照的柱状图。
     横轴：配置名；纵轴：ATE (m)；红虚线标注 baseline。
     """
-    # 筛选范围配置（排除逐层）
-    range_keys = [k for k in results
-                  if k not in ("baseline",)
-                  and not k.startswith(("G", "F"))
-                  or k in ("baseline",)]
-    # 更精确的过滤
-    range_keys = ["baseline"] + [
-        k for k in results
-        if k.startswith("range_") or k in (
-            "all_global", "all_frame", "first_half_global", "second_half_global"
-        )
+    # enforce a readable display order, skipping per-layer G/F configs
+    _order = [
+        "baseline",
+        "range_global_3_4", "range_frame_3_4", "range_both_3_4",
+        "range_global_4_8", "range_frame_4_8", "range_both_4_8",
+        "range_global_10_16", "range_frame_10_16", "range_both_10_16",
+        "range_global_20_23", "range_frame_20_23", "range_both_20_23",
+        "range_both_3_4_10_16", "range_global_4_8_20_23",
+        "all_global", "all_frame", "first_half_global", "second_half_global",
     ]
-    range_keys = [k for k in range_keys if k in results]
+    range_keys = [k for k in _order if k in results]
 
     if not range_keys:
         print("  [WARN] No range config data, skipping range_ablation plot")
@@ -862,7 +894,7 @@ def plot_range_ablation(results: dict, out_dir: Path) -> None:
 
     baseline_ate = _safe(results, "baseline", "tum", "ate")
 
-    fig, axes = plt.subplots(1, 2, figsize=(16, 5))
+    fig, axes = plt.subplots(1, 2, figsize=(max(16, len(range_keys) * 0.9), 5))
 
     for ax, vals, ylabel, title in [
         (axes[0], ate_vals,  "ATE (m)",   "TUM ATE - Range Silencing Comparison"),
@@ -1019,16 +1051,22 @@ def print_summary_table(results: dict) -> None:
     print()
 
     print(f"  {'-'*70}")
-    print("  Observed sparse layers (3-4, 10-16) silencing results:")
-    for key in ["range_global_3_4", "range_frame_3_4", "range_both_3_4",
-                "range_global_10_16", "range_frame_10_16", "range_both_10_16",
-                "range_both_3_4_10_16"]:
+    print("  Range silencing results (observed sparse + new hypotheses):")
+    range_report_keys = [
+        "range_global_3_4",    "range_frame_3_4",    "range_both_3_4",
+        "range_global_10_16",  "range_frame_10_16",  "range_both_10_16",
+        "range_both_3_4_10_16",
+        "range_global_4_8",    "range_frame_4_8",    "range_both_4_8",
+        "range_global_20_23",  "range_frame_20_23",  "range_both_20_23",
+        "range_global_4_8_20_23",
+    ]
+    for key in range_report_keys:
         ate = _safe(results, key, "tum", "ate")
         if np.isnan(ate):
             continue
         delta = ate - baseline_ate
         pct   = delta / baseline_ate * 100
-        print(f"    {key:<32} ATE={ate:.4f} m  d={delta:+.4f} m ({pct:+.1f}%)")
+        print(f"    {key:<36} ATE={ate:.4f} m  d={delta:+.4f} m ({pct:+.1f}%)")
 
 
 def save_all_plots(results: dict, out_dir: Path) -> None:
