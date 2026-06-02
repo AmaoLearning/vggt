@@ -106,6 +106,7 @@ DATASET_ROOT  = _PROJECT_ROOT.parent / "datasets"
 DATASET_PATHS = {
     "tum":     DATASET_ROOT / "tum-dynamics" / "walking_xyz",
     "7scenes": DATASET_ROOT / "7-scenes"     / "chess",
+    "sintel":  DATASET_ROOT / "sintel"       / "training",
 }
 
 # 根据 visualize_attention.py 结果的用户观测
@@ -470,8 +471,86 @@ def load_7scenes_chess(data_dir: Path, max_frames: int) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 4. 推理
+# 3b. Sintel 数据集加载（相机位姿评估）
 # ══════════════════════════════════════════════════════════════════════════════
+
+def _parse_sintel_cam(cam_file: Path) -> np.ndarray:
+    """
+    Parse a Sintel .cam file and return the camera-to-world (c2w) 4x4 matrix.
+
+    The .cam format contains two flattened 3x3 / 3x4 matrices:
+      values 0-8   : intrinsic K (3x3, row-major)
+      values 9-20  : extrinsic [R|t] (3x4, row-major, world-to-camera)
+    """
+    vals = []
+    for line in cam_file.read_text().splitlines():
+        line = line.strip()
+        if line:
+            vals.extend(map(float, line.split()))
+    if len(vals) < 21:
+        raise ValueError(f"Unexpected .cam file (only {len(vals)} values): {cam_file}")
+    E = np.array(vals[9:21], dtype=np.float64).reshape(3, 4)
+    w2c = np.eye(4, dtype=np.float64)
+    w2c[:3, :] = E
+    return np.linalg.inv(w2c)   # c2w
+
+
+def load_sintel_poses(data_dir: Path, max_frames: int,
+                     max_scenes: int = 3) -> List[dict]:
+    """
+    Load Sintel training scenes for camera pose evaluation.
+
+    Directory layout:
+        training/
+          clean/<scene>/frame_*.png
+          camdata_left/<scene>/frame_*.cam   (intrinsics + extrinsics)
+
+    Returns a list of per-scene dicts:
+        { "scene": str, "frames": Tensor[S,3,H,W], "poses_c2w": ndarray[S,4,4] }
+    """
+    clean_dir = data_dir / "clean"
+    cam_dir   = data_dir / "camdata_left"
+
+    if not clean_dir.exists():
+        raise FileNotFoundError(f"Sintel clean dir not found: {clean_dir}")
+    if not cam_dir.exists():
+        raise FileNotFoundError(f"Sintel camdata_left dir not found: {cam_dir}")
+
+    scenes = sorted(d.name for d in clean_dir.iterdir() if d.is_dir())
+    scenes = scenes[:max_scenes]
+
+    tf = _make_transform()
+    result = []
+
+    for scene in scenes:
+        rgb_files = sorted((clean_dir / scene).glob("frame_*.png"))[:max_frames]
+        frames, poses = [], []
+
+        for rf in rgb_files:
+            cam_f = cam_dir / scene / rf.with_suffix(".cam").name
+            if not cam_f.exists():
+                continue
+            try:
+                c2w = _parse_sintel_cam(cam_f)
+            except (ValueError, AssertionError) as e:
+                warnings.warn(f"Sintel cam parse error {cam_f}: {e}")
+                continue
+            frames.append(tf(Image.open(rf).convert("RGB")))
+            poses.append(c2w)
+
+        if len(frames) < 2:
+            continue
+
+        result.append({
+            "scene":     scene,
+            "frames":    torch.stack(frames),
+            "poses_c2w": np.array(poses),
+        })
+
+    if not result:
+        raise FileNotFoundError(f"Sintel: no valid scenes with .cam files in {data_dir}")
+
+    return result
 
 def run_inference(model: VGGT, frames: torch.Tensor,
                   dtype: torch.dtype, device: str,
@@ -601,9 +680,50 @@ def evaluate_camera_pose(model: VGGT, data: dict,
     return {"ate": ate, "rpet": rpet, "rper": rper}, elapsed
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 6. 主评估循环
-# ══════════════════════════════════════════════════════════════════════════════
+def evaluate_sintel_pose(model: VGGT, scenes: List[dict],
+                         dtype: torch.dtype, device: str,
+                         warmup: int) -> Tuple[dict, float]:
+    """
+    Evaluate camera pose on Sintel: per-scene ATE/RPE, then averaged.
+
+    scenes : list of dicts with keys "frames", "poses_c2w", "scene"
+    Returns: aggregated metrics dict + total elapsed time (s)
+    """
+    all_ate, all_rpet, all_rper = [], [], []
+    total_elapsed = 0.0
+
+    for scene_data in scenes:
+        frames    = scene_data["frames"]
+        poses_c2w = scene_data["poses_c2w"]
+
+        preds, elapsed = run_inference(model, frames, dtype, device, warmup)
+        total_elapsed += elapsed
+
+        extri, _ = pose_encoding_to_extri_intri(
+            preds["pose_enc"],
+            image_size_hw=(IMG_SIZE, IMG_SIZE),
+            build_intrinsics=False,
+        )
+        extri_np = extri.squeeze(0).numpy()
+        S = min(extri_np.shape[0], poses_c2w.shape[0])
+
+        try:
+            ate        = compute_ate(extri_np[:S], poses_c2w[:S])
+            rpet, rper = compute_rpe(extri_np[:S], poses_c2w[:S])
+            all_ate.append(ate)
+            all_rpet.append(rpet)
+            all_rper.append(rper)
+        except Exception as e:
+            warnings.warn(f"Sintel scene {scene_data.get('scene','?')} pose eval failed: {e}")
+
+    if not all_ate:
+        return {"ate": np.nan, "rpet": np.nan, "rper": np.nan}, total_elapsed
+
+    return {
+        "ate":  float(np.mean(all_ate)),
+        "rpet": float(np.mean(all_rpet)),
+        "rper": float(np.mean(all_rper)),
+    }, total_elapsed
 
 def run_all_evaluations(args) -> dict:
     device = args.device
@@ -623,15 +743,24 @@ def run_all_evaluations(args) -> dict:
         p = Path(args.data_root) / key if args.data_root else default_path
         try:
             if key == "tum":
-                print(f"\n  加载 TUM walking_xyz ({p}) ...")
+                print(f"\n  Loading TUM walking_xyz ({p}) ...")
                 datasets[key] = load_tum_walking_xyz(p, args.max_frames)
+                S = datasets[key]["frames"].shape[0]
+                print(f"    -> {S} frames")
             elif key == "7scenes":
-                print(f"  加载 7-Scenes chess  ({p}) ...")
+                print(f"  Loading 7-Scenes chess  ({p}) ...")
                 datasets[key] = load_7scenes_chess(p, args.max_frames)
-            S = datasets[key]["frames"].shape[0]
-            print(f"    → {S} 帧")
+                S = datasets[key]["frames"].shape[0]
+                print(f"    -> {S} frames")
+            elif key == "sintel":
+                print(f"  Loading Sintel training ({p}) ...")
+                scenes = load_sintel_poses(p, args.max_frames,
+                                          max_scenes=args.sintel_max_scenes)
+                datasets[key] = scenes   # list of scene dicts
+                n_frames = sum(s["frames"].shape[0] for s in scenes)
+                print(f"    -> {len(scenes)} scenes, {n_frames} frames total")
         except (FileNotFoundError, AssertionError) as e:
-            print(f"    ⚠ 跳过 {key}：{e}")
+            print(f"    [SKIP] {key}: {e}")
             datasets[key] = None
 
     if all(v is None for v in datasets.values()):
@@ -724,7 +853,7 @@ def save_results_csv(results: dict, out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     rows = []
     for cfg_name, res in results.items():
-        for task in ("tum", "7scenes"):
+        for task in ("tum", "7scenes", "sintel"):
             if task not in res or "error" in res[task]:
                 continue
             for metric, val in res[task].items():
@@ -1026,11 +1155,15 @@ def print_summary_table(results: dict) -> None:
     if np.isnan(baseline_ate):
         return
 
-    print(f"\n{'='*70}")
+    print(f"\n{'='*80}")
     print(f"  Summary  (baseline TUM ATE = {baseline_ate:.4f} m)")
-    print(f"{'='*70}")
-    print(f"  {'Config':<35} {'TUM ATE':>9} {'dATE':>9} {'Impact':>10}")
-    print(f"  {'-'*35} {'-'*9} {'-'*9} {'-'*10}")
+    print(f"{'='*80}")
+
+    baseline_sintel = _safe(results, "baseline", "sintel", "ate")
+    sintel_header = f"  {'Sintel ATE':>11}" if not np.isnan(baseline_sintel) else ""
+
+    print(f"  {'Config':<32} {'TUM ATE':>9} {'dATE(TUM)':>10}{sintel_header}  {'Impact':>12}")
+    print(f"  {'-'*32} {'-'*9} {'-'*10}{'-'*12 if sintel_header else ''}  {'-'*12}")
 
     for cfg_name, res in results.items():
         ate = _safe(results, cfg_name, "tum", "ate")
@@ -1045,13 +1178,19 @@ def print_summary_table(results: dict) -> None:
             impact = "[!] moderate"
         else:
             impact = "[X] severe"
-        label = res.get("label", cfg_name)[:34]
-        print(f"  {cfg_name:<20} {label:<14} {ate:>9.4f} {delta:>+9.4f} {impact:>12}")
+        sintel_ate = _safe(results, cfg_name, "sintel", "ate")
+        sintel_str = f"  {sintel_ate:>11.4f}" if not np.isnan(baseline_sintel) else ""
+        label = res.get("label", cfg_name)[:31]
+        print(f"  {cfg_name:<32} {ate:>9.4f} {delta:>+10.4f}{sintel_str}  {impact:>12}")
 
     print()
 
-    print(f"  {'-'*70}")
+    print(f"  {'-'*80}")
     print("  Range silencing results (observed sparse + new hypotheses):")
+    if not np.isnan(baseline_sintel):
+        print(f"  {'Config':<36} {'TUM ATE':>9} {'dATE(TUM)':>10}  {'Sintel ATE':>10} {'dATE(Sin)':>10}")
+    else:
+        print(f"  {'Config':<36} {'TUM ATE':>9} {'dATE(TUM)':>10}")
     range_report_keys = [
         "range_global_3_4",    "range_frame_3_4",    "range_both_3_4",
         "range_global_10_16",  "range_frame_10_16",  "range_both_10_16",
@@ -1064,9 +1203,16 @@ def print_summary_table(results: dict) -> None:
         ate = _safe(results, key, "tum", "ate")
         if np.isnan(ate):
             continue
-        delta = ate - baseline_ate
-        pct   = delta / baseline_ate * 100
-        print(f"    {key:<36} ATE={ate:.4f} m  d={delta:+.4f} m ({pct:+.1f}%)")
+        delta_tum = ate - baseline_ate
+        pct_tum   = delta_tum / baseline_ate * 100
+        sintel_ate   = _safe(results, key, "sintel", "ate")
+        if not np.isnan(baseline_sintel) and not np.isnan(sintel_ate):
+            delta_sin = sintel_ate - baseline_sintel
+            pct_sin   = delta_sin / baseline_sintel * 100
+            print(f"    {key:<36} {ate:>9.4f} {delta_tum:>+10.4f} ({pct_tum:+5.1f}%)  "
+                  f"{sintel_ate:>10.4f} {delta_sin:>+10.4f} ({pct_sin:+5.1f}%)")
+        else:
+            print(f"    {key:<36} {ate:>9.4f} {delta_tum:>+10.4f} ({pct_tum:+5.1f}%)")
 
 
 def save_all_plots(results: dict, out_dir: Path) -> None:
@@ -1112,6 +1258,8 @@ def parse_args():
     )
     p.add_argument("--out_dir", type=str, default=None,
                    help="结果输出目录（默认：tests/results/silence_test/）")
+    p.add_argument("--sintel_max_scenes", type=int, default=3,
+                   help="Sintel: max number of scenes to evaluate (default 3)")
     return p.parse_args()
 
 
