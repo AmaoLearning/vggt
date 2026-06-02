@@ -151,3 +151,5 @@ skyseg.onnx
 docs/*
 .7z
 tests/results/*
+
+.codex/
