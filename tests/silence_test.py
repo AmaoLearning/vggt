@@ -252,6 +252,25 @@ def build_silence_configs(groups: Optional[List[str]] = None) -> Dict[str, Silen
             label="global 4-8 + 20-23 silence (skip critical 11-15)",
         )
 
+        # 保留关键 global 9-16，对其余 global 进行静默；frame 全部保留。
+        configs["range_keep_global_9_16"] = SilenceConfig(
+            global_layers=list(range(0, 9)) + list(range(17, 24)),
+            label="keep global 9-16, keep all frame",
+        )
+
+        # global 全部保留；frame 仅保留 12-23（即静默 0-11）。
+        configs["range_keep_frame_12_23"] = SilenceConfig(
+            frame_layers=list(range(0, 12)),
+            label="keep all global, keep frame 12-23",
+        )
+
+        # global 仅保留 9-16；frame 仅保留 12-23。
+        configs["range_keep_global_9_16_frame_12_23"] = SilenceConfig(
+            global_layers=list(range(0, 9)) + list(range(17, 24)),
+            frame_layers=list(range(0, 12)),
+            label="keep global 9-16, keep frame 12-23",
+        )
+
     # ── boundary：边界对照 ────────────────────────────────────────────────────
     if "boundary" in active:
         configs["all_global"] = SilenceConfig(
@@ -1051,6 +1070,9 @@ def plot_range_ablation(results: dict, out_dir: Path) -> None:
         "range_global_10_16", "range_frame_10_16", "range_both_10_16",
         "range_global_20_23", "range_frame_20_23", "range_both_20_23",
         "range_both_3_4_10_16", "range_global_4_8_20_23",
+        "range_keep_global_9_16",
+        "range_keep_frame_12_23",
+        "range_keep_global_9_16_frame_12_23",
         "all_global", "all_frame", "first_half_global", "second_half_global",
     ]
     range_keys = [k for k in _order if k in results]
@@ -1239,6 +1261,9 @@ def print_summary_table(results: dict) -> None:
         "range_global_4_8",    "range_frame_4_8",    "range_both_4_8",
         "range_global_20_23",  "range_frame_20_23",  "range_both_20_23",
         "range_global_4_8_20_23",
+        "range_keep_global_9_16",
+        "range_keep_frame_12_23",
+        "range_keep_global_9_16_frame_12_23",
     ]
     for key in range_report_keys:
         ate = _safe(results, key, "tum", "ate")

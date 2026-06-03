@@ -154,6 +154,20 @@ def build_silence_configs(groups: Optional[List[str]] = None) -> Dict[str, Silen
             label="global+frame 3-4 + 10-16",
         )
 
+        configs["range_keep_global_4_8_14_20"] = SilenceConfig(
+            global_layers=list(range(0, 4)) + list(range(9, 14)) + list(range(21, 24)),
+            label="keep global 4-8 + 14-20, keep all frame",
+        )
+        configs["range_keep_frame_1_9"] = SilenceConfig(
+            frame_layers=[0] + list(range(10, 24)),
+            label="keep all global, keep frame 1-9",
+        )
+        configs["range_keep_global_4_8_14_20_frame_1_9"] = SilenceConfig(
+            global_layers=list(range(0, 4)) + list(range(9, 14)) + list(range(21, 24)),
+            frame_layers=[0] + list(range(10, 24)),
+            label="keep global 4-8 + 14-20, keep frame 1-9",
+        )
+
     if "boundary" in active:
         configs["all_global"] = SilenceConfig(
             global_layers=list(range(24)),
@@ -517,6 +531,9 @@ def plot_range_ablation(results: dict, out_dir: Path) -> None:
         "range_global_10_16", "range_frame_10_16", "range_both_10_16",
         "range_global_20_23", "range_frame_20_23", "range_both_20_23",
         "range_both_3_4_10_16", "range_global_4_8_20_23",
+        "range_keep_global_4_8_14_20",
+        "range_keep_frame_1_9",
+        "range_keep_global_4_8_14_20_frame_1_9",
         "all_global", "all_frame", "first_half_global", "second_half_global",
     ]
     keys = [k for k in keys if k in results]
